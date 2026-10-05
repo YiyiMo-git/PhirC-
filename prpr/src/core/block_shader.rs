@@ -502,6 +502,13 @@ fn copy_scene(res: &Resource, pass: Option<miniquad::RenderPass>, viewport: (i32
         glActiveTexture(GL_TEXTURE0);
         glGetIntegerv(TEXTURE_BINDING_2D, &mut bound);
         glBindTexture(GL_TEXTURE_2D, texture.raw_miniquad_texture_handle().gl_internal_id());
+        // 本来想在这里用 `glCopyTexSubImage2D`（只往已有存储写，比 `glCopyTexImage2D`
+        // 那种「每帧重新定义整张纹理图像」便宜很多，移动端 GPU 上差距明显）。
+        //
+        // ⚠️ 但这个 miniquad fork 的绑定表里**没有** `glCopyTexSubImage2D`：
+        // 它只存在于 `native/apple/gl.rs` 和 `native/wasm/webgl.rs`，
+        // **Android 与桌面的表里都没有**（实测 `cargo ndk check` 报 cannot find function）。
+        // 所以只能用 `glCopyTexImage2D`。真要省这一下，得给 fork 补绑定或改用 FBO blit。
         glCopyTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, viewport.0, viewport.1, viewport.2, viewport.3, 0);
         glBindTexture(GL_TEXTURE_2D, bound as u32);
         glActiveTexture(active as u32);
