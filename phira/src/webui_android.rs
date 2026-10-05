@@ -30,11 +30,9 @@ use jni::{
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Java 侧承载静态入口的类描述符。
-///
-/// `jni_str!` 只接受**字面量**（`concat!` 拼不出来），所以整串写上；
-/// 这个常量在 `find_class` 与所有 `call_static_method` 里共用，只在定义处出现一次。
-const ACTIVITY_CLASS: &jni::strings::JNIStr = jni_str!("org/flos/phira/modded/MainActivity");
+// 注意：这里**故意没有** `ACTIVITY_CLASS` 这样的类名常量。
+// 用类名会让 jni 走 `FindClass`，而原生线程上的 `FindClass` 用系统类加载器、
+// 找不到 app 自己的类（见 `call_static` 的注释）。类一律从 Activity 实例上取。
 
 /// 只打印一次「JNI 调用失败」，避免把日志刷爆。
 static WARNED_CREATE: AtomicBool = AtomicBool::new(false);
@@ -62,12 +60,25 @@ where
 }
 
 /// 调用 `MainActivity` 的一个静态方法。`f` 负责实际的方法调用。
+///
+/// # ⚠️ 为什么不用 `env.find_class()`
+///
+/// 这是 Android 上一个非常经典的坑：**从原生线程调用 `FindClass` 会失败**。
+/// `FindClass` 在原生线程上走的是**系统类加载器**，而它**不认识 app 自己的类**，
+/// 于是抛 `ClassNotFoundException`。游戏线程（miniquad 起的）正是原生线程。
+///
+/// 表现就是：`webuiCreate` 从来没被真正调到 → WebView 根本没建 → 「没有 web 界面」。
+///
+/// 正确做法：拿 **Activity 实例**（`ndk_context` 里就有）再用 `GetObjectClass`，
+/// 走的是实例自己的类，不经过类加载器查找。工程里已有的 `lib.rs::call_activity_void`
+/// 用的也是同一思路（它直接调实例方法）。
 fn call_static<F>(warned: &AtomicBool, what: &str, f: F)
 where
     F: FnOnce(&mut jni::Env, JClass) -> jni::errors::Result<()>,
 {
     with_env(warned, what, |env| {
-        let class = env.find_class(ACTIVITY_CLASS)?;
+        let act = activity(env);
+        let class = env.get_object_class(&act)?;
         f(env, class)
     })
 }
@@ -107,10 +118,10 @@ impl AndroidHost {
         if self.created.swap(true, Ordering::Relaxed) {
             return;
         }
-        call_static(&WARNED_CREATE, "webuiCreate", |env, _class| {
+        call_static(&WARNED_CREATE, "webuiCreate", |env, class| {
             let act = activity(env);
             env.call_static_method(
-                ACTIVITY_CLASS,
+                &class,
                 jni_str!("webuiCreate"),
                 jni_sig!("(Landroid/app/Activity;)V"),
                 &[(&act).into()],
@@ -129,10 +140,10 @@ impl AndroidHost {
 
     /// 在页面里执行 JS（等价于 Windows 侧 wry 的 `evaluate_script`）。
     fn eval(js: &str) {
-        with_env(&WARNED_EVAL, "webuiEval", |env| {
+        call_static(&WARNED_EVAL, "webuiEval", |env, class| {
             let jstr = env.new_string(js)?;
             env.call_static_method(
-                ACTIVITY_CLASS,
+                &class,
                 jni_str!("webuiEval"),
                 jni_sig!("(Ljava/lang/String;)V"),
                 &[(&jstr).into()],
@@ -158,11 +169,11 @@ impl AndroidHost {
                 tracing::warn!("[webui-android] 内嵌资源缺失：{path}");
                 continue;
             };
-            with_env(&WARNED_PUSH, "webuiPutAsset", |env| {
+            call_static(&WARNED_PUSH, "webuiPutAsset", |env, class| {
                 let jpath = env.new_string(path)?;
                 let jbytes = env.byte_array_from_slice(&data)?;
                 env.call_static_method(
-                    ACTIVITY_CLASS,
+                    &class,
                     jni_str!("webuiPutAsset"),
                     jni_sig!("(Ljava/lang/String;[B)V"),
                     &[(&jpath).into(), (&jbytes).into()],
@@ -171,9 +182,9 @@ impl AndroidHost {
             });
         }
         // 资源灌完再让页面加载 —— 否则首屏会 404。
-        call_static(&WARNED_PUSH, "webuiLoadHome", |env, _class| {
+        call_static(&WARNED_PUSH, "webuiLoadHome", |env, class| {
             env.call_static_method(
-                ACTIVITY_CLASS,
+                &class,
                 jni_str!("webuiLoadHome"),
                 jni_sig!("()V"),
                 &[],
@@ -192,9 +203,9 @@ impl WebUiHost for AndroidHost {
         // 不依赖 UI 线程和游戏线程谁先跑。
         self.push_assets_once();
         self.ensure_created();
-        call_static(&WARNED_CREATE, "webuiSetVisible(true)", |env, _class| {
+        call_static(&WARNED_CREATE, "webuiSetVisible(true)", |env, class| {
             env.call_static_method(
-                ACTIVITY_CLASS,
+                &class,
                 jni_str!("webuiSetVisible"),
                 jni_sig!("(Z)V"),
                 &[jni::objects::JValue::Bool(true)],
@@ -204,9 +215,9 @@ impl WebUiHost for AndroidHost {
     }
 
     fn hide(&self) {
-        call_static(&WARNED_CREATE, "webuiSetVisible(false)", |env, _class| {
+        call_static(&WARNED_CREATE, "webuiSetVisible(false)", |env, class| {
             env.call_static_method(
-                ACTIVITY_CLASS,
+                &class,
                 jni_str!("webuiSetVisible"),
                 jni_sig!("(Z)V"),
                 &[jni::objects::JValue::Bool(false)],
@@ -224,9 +235,9 @@ impl WebUiHost for AndroidHost {
     }
 
     fn shutdown(&self) {
-        call_static(&WARNED_CREATE, "webuiDestroy", |env, _class| {
+        call_static(&WARNED_CREATE, "webuiDestroy", |env, class| {
             env.call_static_method(
-                ACTIVITY_CLASS,
+                &class,
                 jni_str!("webuiDestroy"),
                 jni_sig!("()V"),
                 &[],
@@ -257,9 +268,9 @@ pub fn on_ready() {
 /// Java 侧查询 WebView 是否已就绪（WebView 实例已建好）。
 pub fn is_ready() -> bool {
     let mut ready = false;
-    call_static(&WARNED_CREATE, "webuiReady", |env, _class| {
+    call_static(&WARNED_CREATE, "webuiReady", |env, class| {
         let v = env.call_static_method(
-            ACTIVITY_CLASS,
+            &class,
             jni_str!("webuiReady"),
             jni_sig!("()Z"),
             &[],
