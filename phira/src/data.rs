@@ -114,10 +114,35 @@ fn default_challenge_selection() -> [Option<SavedChallengeChart>; 3] {
     std::array::from_fn(|_| None)
 }
 
+/// 设置页「账号管理」里保存的一个账号。
+///
+/// Phira 只有「邮箱 + 密码」登录（没有长期 token），所以切换账号 = 用这份凭据重新登录。
+/// `name` / `avatar` / `rks` 是登录后缓存的展示信息，这样列表在**离线**时也能显示。
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SavedAccount {
+    /// 登录邮箱（也是去重用的键）。
+    pub email: String,
+    /// 密码（明文 —— 与官方客户端同样把凭据放在本地 data 里，仅本机可读）。
+    pub password: String,
+    /// 缓存的展示名。
+    pub name: String,
+    /// 缓存的头像 URL。
+    pub avatar: String,
+    /// 缓存的 RKS。
+    pub rks: f32,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 #[serde(default)]
-pub struct Data {
-    pub me: Option<User>,
+pub struct Data {    pub me: Option<User>,
+    /// 多账号：设置页「账号管理」里添加过的账号。
+    ///
+    /// Phira 用**邮箱 + 密码**登录，没有长期 token，所以这里把凭据一起存下来，
+    /// 切换账号时直接用它重新登录（`phira/src/page/user.rs` 的 `switch_account`）。
+    /// 新字段带 `#[serde(default)]`（结构体上已有 `#[serde(default)]`），
+    /// 老 `data.json` 照样能读。
+    pub accounts: Vec<SavedAccount>,
     pub charts: Vec<LocalChart>,
     pub local_records: HashMap<String, Option<SimpleRecord>>,
     pub config: Config,

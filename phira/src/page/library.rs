@@ -1548,7 +1548,6 @@ impl Page for LibraryPage {
         // 这样图标 + 字号 + 行高会一起变大，不会出现「框大了字还小」的错位。
         // 图标基准 18px（原设计稿值），放大后作为图标与内嵌文字的共同基准。
         let lib_scale = if compact { 1.3 } else { 1.15 };
-        let icon_base = 18. * lib_scale;
         let head_h = m.u(58. * lib_scale);
         let cr = ui.content_rect();
         let right = cr.right();

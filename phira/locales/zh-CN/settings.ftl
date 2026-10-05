@@ -2,6 +2,33 @@
 label = 设置
 
 general = 通用
+account = 账号
+
+# ---- 「账号」页：多账号管理（添加 / 切换 / 删除）----
+account-current = 当前账号
+account-none = 未登录
+account-none-sub = 登录后才能上传成绩、参与排行
+account-current-tag = 使用中
+account-add = 添加账号
+account-add-sub = 输入邮箱和密码，登录后会自动保存，之后可一键切换
+account-add-btn = 添加
+account-working = 正在登录…
+account-empty = 还没有保存的账号
+account-empty-sub = 点上面的「添加」保存第一个账号
+account-switch = 切换
+account-remove = 删除
+account-remove-confirm = 再点一次「删除」确认删除这个账号
+account-in-use = 使用中
+account-logout = 退出登录
+account-removed = 已删除该账号
+account-switched = 已切换到
+account-added = 已添加并登录
+account-logged-out = 已退出登录
+account-already-current = 已经是当前账号
+account-failed = 账号操作失败
+account-email-hint = 请输入登录邮箱
+account-pwd-hint = 请输入密码
+
 audio = 音频
 chart = 谱面
 item-autoplay = 自动游玩

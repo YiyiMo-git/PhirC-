@@ -1,5 +1,31 @@
 label = 設定
 general = 通用
+account = 帳號
+
+# ---- 「帳號」頁：多帳號管理（新增 / 切換 / 刪除）----
+account-current = 目前帳號
+account-none = 未登入
+account-none-sub = 登入後才能上傳成績、參與排行
+account-current-tag = 使用中
+account-add = 新增帳號
+account-add-sub = 輸入信箱和密碼，登入後會自動儲存，之後可一鍵切換
+account-add-btn = 新增
+account-working = 正在登入…
+account-empty = 還沒有儲存的帳號
+account-empty-sub = 點上面的「新增」儲存第一個帳號
+account-switch = 切換
+account-remove = 刪除
+account-remove-confirm = 再點一次「刪除」確認刪除此帳號
+account-in-use = 使用中
+account-logout = 登出
+account-removed = 已刪除該帳號
+account-switched = 已切換到
+account-added = 已新增並登入
+account-logged-out = 已登出
+account-already-current = 已經是目前的帳號
+account-failed = 帳號操作失敗
+account-email-hint = 請輸入登入信箱
+account-pwd-hint = 請輸入密碼
 audio = 音訊
 chart = 譜面
 item-autoplay = 自動遊玩 (Auto)

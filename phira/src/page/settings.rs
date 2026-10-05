@@ -1,6 +1,7 @@
 prpr_l10n::tl_file!("settings");
 
 use super::{NextPage, OffsetPage, Page, SharedState};
+use crate::newui::Metrics;
 use crate::{
     dir, get_data, get_data_mut,
     popup::ChooseButton,
@@ -8,8 +9,7 @@ use crate::{
     scene::BGM_VOLUME_UPDATED,
     sync_data,
     tabs::{Tabs, TitleFn},
-};
-use anyhow::Result;
+};use anyhow::Result;
 use bytesize::ByteSize;
 use inputbox::InputBox;
 use macroquad::prelude::*;
@@ -165,6 +165,7 @@ static STAFF_LIST: Lazy<StaffList> = Lazy::new(|| {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingListType {
     General,
+    Account,
     Audio,
     Chart,
     ChartUi,
@@ -174,6 +175,7 @@ enum SettingListType {
 
 pub struct SettingsPage {
     list_general: GeneralList,
+    list_account: AccountList,
     list_audio: AudioList,
     list_chart: ChartList,
     list_chart_ui: ChartUiList,
@@ -193,6 +195,7 @@ impl SettingsPage {
     pub fn new(icon: SafeTexture, icon_lang: SafeTexture) -> Self {
         Self {
             list_general: GeneralList::new(icon_lang),
+            list_account: AccountList::new(),
             list_audio: AudioList::new(),
             list_chart: ChartList::new(),
             list_chart_ui: ChartUiList::new(),
@@ -200,12 +203,13 @@ impl SettingsPage {
 
             tabs: Tabs::new([
                 (SettingListType::General, || tl!("general")),
+                (SettingListType::Account, || tl!("account")),
                 (SettingListType::Audio, || tl!("audio")),
                 (SettingListType::Chart, || tl!("chart")),
                 (SettingListType::ChartUi, || tl!("chart-ui")),
                 (SettingListType::Debug, || tl!("debug")),
                 (SettingListType::About, || tl!("about")),
-            ] as [(SettingListType, TitleFn); 6]),
+            ] as [(SettingListType, TitleFn); 7]),
 
             scroll: Scroll::new(),
             save_time: f32::INFINITY,
@@ -232,6 +236,7 @@ impl Page for SettingsPage {
         let t = s.t;
         if match self.tabs.selected() {
             SettingListType::General => self.list_general.top_touch(touch, t),
+            SettingListType::Account => self.list_account.top_touch(touch, t),
             SettingListType::Audio => self.list_audio.top_touch(touch, t),
             SettingListType::Chart => self.list_chart.top_touch(touch, t),
             SettingListType::ChartUi => self.list_chart_ui.top_touch(touch, t),
@@ -252,6 +257,7 @@ impl Page for SettingsPage {
         }
         if let Some(p) = match self.tabs.selected() {
             SettingListType::General => self.list_general.touch(touch, t)?,
+            SettingListType::Account => self.list_account.touch(touch, t)?,
             SettingListType::Audio => self.list_audio.touch(touch, t)?,
             SettingListType::Chart => self.list_chart.touch(touch, t)?,
             SettingListType::ChartUi => self.list_chart_ui.touch(touch, t)?,
@@ -271,6 +277,7 @@ impl Page for SettingsPage {
         let t = s.t;
         let changed = match self.tabs.selected() {
             SettingListType::General => self.list_general.update(t)?,
+            SettingListType::Account => self.list_account.update(t)?,
             SettingListType::Audio => self.list_audio.update(t)?,
             SettingListType::Chart => self.list_chart.update(t)?,
             SettingListType::ChartUi => self.list_chart_ui.update(t)?,
@@ -348,6 +355,7 @@ impl Page for SettingsPage {
                     ui.dy(r.y);
                     self.scroll.render(ui, |ui| match item {
                         SettingListType::General => self.list_general.render(ui, r, t),
+            SettingListType::Account => self.list_account.render(ui, r, t),
                         SettingListType::Audio => self.list_audio.render(ui, r, t),
                         SettingListType::Chart => self.list_chart.render(ui, r, t),
                         SettingListType::ChartUi => self.list_chart_ui.render(ui, r, t),
@@ -901,6 +909,24 @@ impl GeneralList {
             }
         }
         if let Some((id, text)) = take_input() {
+            // ---- 「账号」页：两步输入（先邮箱，再密码）----
+            // 这里只做**投递**，真正起任务在 `AccountList` 里，所以用一个模块级槽位
+            // 转手（`self` 是 `GeneralList`，拿不到 `SettingsPage::list_account`）。
+            if id == "account_email" {
+                if !text.trim().is_empty() {
+                    ACCOUNT_ADD.with(|it| *it.borrow_mut() = Some(AccountAddStep::Email(text.trim().to_owned())));
+                    request_input("account_pwd", InputBox::new().title(tl!("account-pwd-hint")));
+                }
+                return Ok(false);
+            }
+            if id == "account_pwd" {
+                ACCOUNT_ADD.with(|it| {
+                    if let Some(AccountAddStep::Email(email)) = it.borrow_mut().take() {
+                        *it.borrow_mut() = Some(AccountAddStep::Ready { email, password: text });
+                    }
+                });
+                return Ok(false);
+            }
             if id == "mp_addr" {
                 if let Err(err) = text.to_socket_addrs() {
                     show_error(anyhow::Error::new(err).context(tl!("item-mp-addr-invalid")));
@@ -2271,6 +2297,367 @@ impl ChartUiList {
             }
         }
         (w, h)
+    }
+}
+
+/// 「添加账号」两步输入在 `GeneralList`（取输入）与 `AccountList`（起任务）之间的转手槽。
+///
+/// 为什么要这个：`take_input()` 只有 `GeneralList::update` 里在读（它还管着
+/// 血量上限 / 连击文字 / 课题等级等一堆输入项），而 `AccountList` 是 `SettingsPage`
+/// 的字段 —— 两者互相看不见，所以用一个模块级槽位传递。
+enum AccountAddStep {
+    /// 第一步：邮箱已填好，等密码
+    Email(String),
+    /// 两步都齐了，可以起登录任务
+    Ready { email: String, password: String },
+}
+
+thread_local! {
+    static ACCOUNT_ADD: std::cell::RefCell<Option<AccountAddStep>> = const { std::cell::RefCell::new(None) };
+}
+
+// ============================ 「账号」页 ============================
+//
+// 多账号管理：列出 `Data::accounts` 里保存过的账号，可**一键切换**、**添加**、**删除**。
+//
+// 为什么做这一页：Phira 只有「邮箱 + 密码」登录，而开始页是那份逐字节冻结的
+// `ui/index.html`，里面**没有任何账号入口** —— 移动端因此根本没法登录 / 换号。
+// 账号管理放在设置里，就不依赖那个 HTML 了。
+//
+// 切换账号 = 用保存的凭据重新登录（Phira 没有长期 token，这是唯一可靠做法），
+// 所以切换是**异步**的：点了以后起一个 Task，跑完显示提示。
+
+/// 「账号」页里正在进行的异步操作。
+enum AccountAction {
+    /// 用保存的凭据切换账号
+    Switch(String),
+    /// 用新填的邮箱 / 密码添加并登录
+    Add,
+}
+
+struct AccountList {
+    /// 每个账号一行「切换」按钮
+    switch_btns: Vec<DRectButton>,
+    /// 每个账号一行「删除」按钮
+    remove_btns: Vec<DRectButton>,
+    /// 顶部「添加账号」按钮
+    add_btn: DRectButton,
+    /// 去登录（未登录时显示）
+    login_btn: DRectButton,
+    /// 退出当前账号
+    logout_btn: DRectButton,
+    /// 正在跑的异步操作
+    task: Option<Task<Result<String>>>,
+    /// 正在跑的操作类型
+    action: Option<AccountAction>,
+    /// 「添加账号」第一步填好的邮箱（等第二步密码）
+    add_email: Option<String>,
+    /// 刚点过「删除」、等下一次点击确认的邮箱（两步删除，避免误删）
+    confirm_remove: Option<String>,
+}
+
+impl AccountList {
+    fn new() -> Self {
+        Self {
+            switch_btns: Vec::new(),
+            remove_btns: Vec::new(),
+            add_btn: DRectButton::new(),
+            login_btn: DRectButton::new(),
+            logout_btn: DRectButton::new(),
+            task: None,
+            action: None,
+            add_email: None,
+            confirm_remove: None,
+        }
+    }
+
+    /// 起一个异步操作（同一时刻只允许一个）。
+    fn start(&mut self, action: AccountAction) {
+        if self.task.is_some() {
+            return;
+        }
+        let fut: std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>> = match &action {
+            AccountAction::Switch(email) => {
+                let email = email.clone();
+                Box::pin(async move { crate::page::user::switch_account(&email).await })
+            }
+            AccountAction::Add => return, // 走 `start_add`（要带密码）
+        };
+        self.action = Some(action);
+        self.task = Some(Task::new(fut));
+    }
+
+    /// 第二步（密码）拿到后，用「邮箱 + 密码」添加并登录新账号。
+    fn start_add(&mut self, email: String, password: String) {
+        if self.task.is_some() {
+            return;
+        }
+        self.action = Some(AccountAction::Add);
+        self.task = Some(Task::new(async move {
+            crate::page::user::add_account(&email, &password).await
+        }));
+    }
+
+    fn top_touch(&mut self, _touch: &Touch, _t: f32) -> bool {
+        false
+    }
+
+    fn touch(&mut self, touch: &Touch, t: f32) -> Result<Option<bool>> {
+        let accounts = get_data().accounts.clone();
+        for (i, acc) in accounts.iter().enumerate() {
+            if let Some(btn) = self.switch_btns.get_mut(i) {
+                if btn.touch(touch, t) {
+                    // 已经是当前账号就不重复登录（省一次网络往返）
+                    if crate::page::user::current_email().as_deref() == Some(acc.email.as_str()) {
+                        show_message(tl!("account-already-current")).ok();
+                    } else {
+                        self.confirm_remove = None;
+                        self.start(AccountAction::Switch(acc.email.clone()));
+                    }
+                    return Ok(Some(true));
+                }
+            }
+            if let Some(btn) = self.remove_btns.get_mut(i) {
+                if btn.touch(touch, t) {
+                    // 两步删除：第一次点只是「待确认」，再点一次才真删，避免误触。
+                    if self.confirm_remove.as_deref() == Some(acc.email.as_str()) {
+                        self.confirm_remove = None;
+                        crate::page::user::forget_account(&acc.email)?;
+                        show_message(tl!("account-removed")).ok();
+                    } else {
+                        self.confirm_remove = Some(acc.email.clone());
+                        show_message(tl!("account-remove-confirm")).ok();
+                    }
+                    return Ok(Some(true));
+                }
+            }
+        }
+        // 点别处就取消「待确认」
+        self.confirm_remove = None;
+
+        if self.add_btn.touch(touch, t) && self.task.is_none() {
+            self.add_email = None;
+            request_input("account_email", InputBox::new().title(tl!("account-email-hint")));
+            return Ok(Some(true));
+        }
+        if self.login_btn.touch(touch, t) && self.task.is_none() {
+            // 未登录时直接走「添加账号」同一套流程
+            self.add_email = None;
+            request_input("account_email", InputBox::new().title(tl!("account-email-hint")));
+            return Ok(Some(true));
+        }
+        if self.logout_btn.touch(touch, t) && self.task.is_none() {
+            crate::page::user::logout()?;
+            show_message(tl!("account-logged-out")).ok();
+            return Ok(Some(true));
+        }
+        Ok(None)
+    }
+
+    fn update(&mut self, _t: f32) -> Result<bool> {
+        // 两步输入都齐了就把登录任务起起来（见 `AccountAddStep`）
+        if self.task.is_none() {
+            let ready = ACCOUNT_ADD.with(|it| match it.borrow_mut().take() {
+                Some(AccountAddStep::Ready { email, password }) => Some((email, password)),
+                Some(other) => {
+                    *it.borrow_mut() = Some(other);
+                    None
+                }
+                None => None,
+            });
+            if let Some((email, password)) = ready {
+                self.start_add(email, password);
+            }
+        }
+        // 异步任务收结果
+        if let Some(task) = &mut self.task {
+            if let Some(res) = task.take() {
+                self.task = None;
+                let was_add = matches!(self.action, Some(AccountAction::Add));
+                self.action = None;
+                match res {
+                    Ok(name) => {
+                        let msg = if was_add {
+                            format!("{} {}", tl!("account-added"), name)
+                        } else {
+                            format!("{} {}", tl!("account-switched"), name)
+                        };
+                        show_message(msg).ok();
+                    }
+                    Err(err) => show_error(err.context(tl!("account-failed"))),
+                }
+                return Ok(true); // 账号变了，列表要重画
+            }
+        }
+        Ok(false)
+    }
+
+    /// 渲染成一行行「账号卡」。
+    ///
+    /// 不复用 `item!`（那是「标题 + 开关」的单行卡），账号行要放头像 + 名字 + 两个按钮，
+    /// 所以这里自己排。
+    fn render(&mut self, ui: &mut Ui, r: Rect, t: f32) -> (f32, f32) {
+        let m = Metrics::new(ui);
+        let th = crate::newui::theme();
+        let w = r.w;
+        let mut h = 0.;
+        let row_h = m.u(64.);
+        let data = get_data();
+        let accounts = data.accounts.clone();
+        let current = crate::page::user::current_email();
+        let logged_in = data.me.is_some();
+        let me_name = data.me.as_ref().map(|it| it.name.clone());
+        drop(data);
+
+        // ---- 当前账号状态 ----
+        {
+            row_card(ui, Rect::new(0., 0., w, row_h));
+            let rt = render_title(
+                ui,
+                if logged_in { tl!("account-current") } else { tl!("account-none") },
+                Some(
+                    if logged_in {
+                        me_name.clone().unwrap_or_default().into()
+                    } else {
+                        tl!("account-none-sub")
+                    },
+                ),
+            );
+            if logged_in {
+                self.logout_btn.render_text(ui, right_rect(w), t, tl!("account-logout"), 0.5, true);
+            }
+            let _ = rt;
+            ui.dy(row_h);
+            h += row_h;
+        }
+
+        // ---- 添加账号 ----
+        if self.task.is_none() {
+            row_card(ui, Rect::new(0., 0., w, row_h - 0.004));
+            render_title(ui, tl!("account-add"), Some(tl!("account-add-sub")));
+            self.add_btn.render_text(ui, right_rect(w), t, tl!("account-add-btn"), 0.5, true);
+            ui.dy(row_h);
+            h += row_h;
+        } else {
+            row_card(ui, Rect::new(0., 0., w, row_h - 0.004));
+            render_title(ui, tl!("account-working"), None);
+            ui.dy(row_h);
+            h += row_h;
+        }
+
+        // ---- 已保存的账号列表 ----
+        if accounts.is_empty() {
+            row_card(ui, Rect::new(0., 0., w, row_h - 0.004));
+            render_title(ui, tl!("account-empty"), Some(tl!("account-empty-sub")));
+            ui.dy(row_h);
+            h += row_h;
+        } else {
+            for (i, acc) in accounts.iter().enumerate() {
+                row_card(ui, Rect::new(0., 0., w, row_h - 0.004));
+                // 头像：`SafeTexture` 拿不到就用名字首字母占位（避免空白行）
+                let av = m.u(40.);
+                let av_r = Rect::new(m.u(10.), (row_h - av) / 2., av, av);
+                let initial = acc
+                    .name
+                    .chars()
+                    .next()
+                    .map(|c| c.to_uppercase().to_string())
+                    .unwrap_or_else(|| "?".to_owned());
+                // 占位圆 + 首字母
+                ui.fill_rect(
+                    av_r,
+                    crate::newui::radial(
+                        (av_r.center().x, av_r.center().y),
+                        av_r.w * 0.5,
+                        if th.dark { Color::new(1., 1., 1., 0.16) } else { Color::new(0., 0., 0., 0.10) },
+                        Color::new(0., 0., 0., 0.),
+                    ),
+                );
+                crate::newui::text(ui, &m, initial, av_r.center().x, av_r.center().y, 17., th.text_hi, (0.5, 0.5));
+
+                // 名字 + 邮箱（邮箱是切换的依据，必须显示）
+                let tx = av_r.right() + m.u(12.);
+                let is_cur = current.as_deref() == Some(acc.email.as_str());
+                let name = if acc.name.is_empty() { acc.email.clone() } else { acc.name.clone() };
+                crate::newui::text_ellipsis(
+                    ui,
+                    &m,
+                    name,
+                    tx,
+                    row_h / 2. - m.u(9.),
+                    15.,
+                    av_r.right().max(0.) + m.u(200.),
+                    th.text_hi,
+                    (0., 0.5),
+                );
+                crate::newui::text_ellipsis(
+                    ui,
+                    &m,
+                    if is_cur {
+                        format!("{} · {}", acc.email, tl!("account-current-tag"))
+                    } else {
+                        acc.email.clone()
+                    },
+                    tx,
+                    row_h / 2. + m.u(10.),
+                    12.,
+                    av_r.right().max(0.) + m.u(200.),
+                    th.text_mute,
+                    (0., 0.5),
+                );
+
+                // 右侧：切换 + 删除
+                let btn_w = m.u(78.);
+                let del_w = m.u(54.);
+                let gap = m.u(6.);
+                let rr = right_rect(w);
+                let del_r = Rect::new(rr.right() - del_w, (row_h - m.u(30.)) / 2., del_w, m.u(30.));
+                let sw_r = Rect::new(del_r.x - gap - btn_w, del_r.y, btn_w, m.u(30.));
+                self.remove_btns
+                    .get_or_insert_with_none(i)
+                    .render_text(ui, del_r, t, tl!("account-remove"), 0.45, false);
+                if !is_cur {
+                    self.switch_btns
+                        .get_or_insert_with_none(i)
+                        .render_text(ui, sw_r, t, tl!("account-switch"), 0.45, true);
+                } else {
+                    // 当前账号：切换按钮位置显示「使用中」提示（不显示按钮，避免误点）
+                    crate::newui::text(ui, &m, tl!("account-in-use"), sw_r.center().x, sw_r.center().y, 13., th.text_dim, (0.5, 0.5));
+                }
+
+                ui.dy(row_h);
+                h += row_h;
+                let _ = i;
+            }
+        }
+
+        // 「待确认删除」的行给个提示色（这里只画提示文字，不做弹窗）
+        if self.confirm_remove.is_some() {
+            crate::newui::text(
+                ui,
+                &m,
+                tl!("account-remove-confirm"),
+                r.x + m.u(10.),
+                0.,
+                13.,
+                crate::newui::theme().text_dim,
+                (0., 0.5),
+            );
+        }
+        (w, h)
+    }
+}
+
+/// 小工具：`Vec` 按下标取按钮，不够就补一个（账号数量会变）。
+trait GetOrInsertBtn {
+    fn get_or_insert_with_none(&mut self, i: usize) -> &mut DRectButton;
+}
+impl GetOrInsertBtn for Vec<DRectButton> {
+    fn get_or_insert_with_none(&mut self, i: usize) -> &mut DRectButton {
+        while self.len() <= i {
+            self.push(DRectButton::new());
+        }
+        &mut self[i]
     }
 }
 

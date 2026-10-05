@@ -53,6 +53,9 @@ pub use song_detail::SongDetailPage;
 mod timing_editor;
 pub use timing_editor::TimingEditor;
 
+/// 多账号管理（设置页「账号」）。Phira 只有邮箱+密码登录，这里保存凭据以支持一键切换。
+pub mod user;
+
 use tokio::sync::Notify;
 
 use crate::{

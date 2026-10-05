@@ -2,6 +2,32 @@
 label = SETTINGS
 
 general = General
+account = Account
+
+# ---- Account page: multiple accounts (add / switch / remove) ----
+account-current = Current account
+account-none = Not signed in
+account-none-sub = Sign in to upload scores and join the leaderboard
+account-current-tag = in use
+account-add = Add account
+account-add-sub = Enter email and password; it will be saved so you can switch with one tap
+account-add-btn = Add
+account-working = Signing in…
+account-empty = No saved accounts yet
+account-empty-sub = Tap "Add" above to save your first account
+account-switch = Switch
+account-remove = Remove
+account-remove-confirm = Tap "Remove" again to confirm removing this account
+account-in-use = in use
+account-logout = Sign out
+account-removed = Account removed
+account-switched = Switched to
+account-added = Added and signed in as
+account-logged-out = Signed out
+account-already-current = Already the current account
+account-failed = Account operation failed
+account-email-hint = Enter your login email
+account-pwd-hint = Enter your password
 audio = Audio
 chart = Chart
 item-autoplay = Autoplay
