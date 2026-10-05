@@ -120,18 +120,15 @@ impl WebUiHost for WryHost {
 }
 
 
-/// WebView 线程：建 WebView，然后循环把 eval 请求转成 `evaluate_script`。
-/// 把键盘焦点交回游戏主窗口。
-///
-/// `HWND SetFocus(HWND)`。参数/返回值都是 `HWND`，在 Rust 侧用 `isize` 表示（ABI 一致）。
-///
-/// 用途见 `WebCmd::Visible` 分支：WebView2 子窗口隐藏后要显式把焦点还回来，
-/// 否则 `WM_CHAR` 永远到不了游戏窗口，游戏内输入框打不进字。
+// `HWND SetFocus(HWND)` —— 参数/返回值都是 `HWND`，Rust 侧用 `isize`（ABI 一致）。
+//
+// 用途见 `WebCmd::Visible` 分支：WebView2 子窗口隐藏后要显式把键盘焦点还回游戏窗口，
+// 否则 `WM_CHAR` 永远到不了游戏窗口，游戏内自绘输入框一个字也打不进。
 unsafe extern "system" {
-    // `HWND SetFocus(HWND)` —— 参数/返回值都是 `HWND`，Rust 侧用 `isize`（ABI 一致）。
     fn SetFocus(hwnd: isize) -> isize;
 }
 
+/// WebView 线程：建 WebView，然后循环把 eval 请求转成 `evaluate_script`。
 fn run_webview(hwnd: isize, cmd_rx: mpsc::Receiver<WebCmd>, ipc_cmd_tx: mpsc::Sender<WebCmd>) {
     let parent = HwndHandle(hwnd);
 
