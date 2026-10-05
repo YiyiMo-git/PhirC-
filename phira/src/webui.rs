@@ -180,8 +180,22 @@ pub fn init_host() {
         match crate::webui_android::AndroidHost::new() {
             Ok(host) => {
                 *WEBUI_HOST.lock().unwrap() = Some(Box::new(host));
-                // 与 Windows 同理：这里还不算「已嵌入」。Android 的 WebView 是在
-                // UI 线程异步建的（第一次 show() 时触发），所以也要等 Java 侧确认。
+                // ⚠️ 这里**必须**立刻置位，否则移动端永远看不到 WebView。
+                //
+                // 原来的链路是个死锁：
+                //   `set_webui_visible(true)` 由 main.rs 调用，但门控要求
+                //   `webui_embedded() == true`；而 `WEBUI_EMBEDDED` 只在
+                //   `AndroidHost::ensure_created()` 里置位，那个函数又只由
+                //   `show()` 触发，`show()` 又只由 `set_webui_visible(true)` 触发。
+                //   → 三者互相等待，`WEBUI_EMBEDDED` 永远为 false，界面一直走原生 UI。
+                //
+                // Windows 没这个问题：`webui_windows` 有自己的 WebView 线程，
+                // 建好之后**自己**调 `set_webui_embedded(true)`，不依赖 `show()`。
+                //
+                // Android/iOS 的 WebView 同样是异步在 UI 线程建的、初始 `hidden`，
+                // 所以这里先声明「已嵌入」是安全的：在它真正可见之前，主场景照常
+                // 渲染原生 UI；`show()` 随后会把 WebView 建出来并显示。
+                set_webui_embedded(true);
                 tracing::info!("[webui] Android WebView 宿主已创建，等待首次显示时建 WebView");
             }
             Err(err) => {
@@ -197,8 +211,8 @@ pub fn init_host() {
         match crate::webui_ios::IosHost::new() {
             Ok(host) => {
                 *WEBUI_HOST.lock().unwrap() = Some(Box::new(host));
-                // 与 Windows/Android 同理：WKWebView 是在主线程异步建的，
-                // 这里还不算「已嵌入」，等首次 show() 时再置位。
+                // 同 Android：必须在这里就置位，否则 iOS 也永远走原生 UI
+                set_webui_embedded(true);
                 tracing::info!("[webui] iOS WKWebView 宿主已创建，等待首次显示时建 WebView");
             }
             Err(err) => {
