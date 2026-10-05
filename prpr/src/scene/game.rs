@@ -459,6 +459,11 @@ impl GameScene {
 
         let music = Self::new_music(&mut res)?;
         crate::core::reset_block_effects();
+        // 预渲染：在**加载阶段**把噪域的着色器编译 + 显存分配全部做掉。
+        // 原来这些都堆在「第一次真的出现噪域」那一帧，表现就是进图卡一下。
+        // 这里只做分配与编译，不产生任何画面输出，观赏度不变。
+        let prewarm_aspect = res.aspect_ratio;
+        crate::core::prewarm_block(&mut res, prewarm_aspect);
         Ok(Self {
             should_exit: false,
             next_scene: None,

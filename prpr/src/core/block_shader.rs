@@ -267,6 +267,53 @@ pub(crate) fn reset_block_effects() {
     });
 }
 
+/// **预渲染 / 预热**：在加载谱面时把噪域用到的一切 GPU 资源提前建好。
+///
+/// # 为什么需要
+///
+/// 噪域的资源原来是**懒加载**的，全部堆在「第一次真的出现噪域」的那一帧：
+///
+/// 1. `MATERIAL` 首次访问 → 编译链接 2 个 block-area 着色器程序；
+/// 2. `frame.effect` / `frame.aux` 首次分配 → 各 `W×H×4` 字节（1080p 约 2.6MB）；
+/// 3. `frame.scene` 首次分配 → 再 2.6MB；
+/// 4. 首次 `gl_copy_tex_image_2d` 全屏拷贝。
+///
+/// 结果就是**进谱面第一帧卡一下**。在加载页把上面的分配与编译全部做掉，
+/// 跑图时那一帧就只剩纯粹的绘制。
+///
+/// # 为什么不"预渲染整段动画"
+///
+/// 噪域的几何本身就是**时间相关**的：`Compose::uv` 里的位移
+/// （`block_mask.rs` 的 `st`/`dt`/`noise`）、灰阶膨胀环每帧重算、
+/// 触摸掩码逐帧随手指变化。所以整段动画不可能预烘焙成贴图 ——
+/// 那需要按帧缓存整段视频，显存根本放不下。
+/// 能预渲染的是**与时间无关的那部分**：材质、纹理尺寸、显存分配。
+///
+/// 本函数**不改任何画面输出**（只做分配与着色器编译），所以观赏度不受影响。
+pub fn prewarm(res: &mut Resource, aspect: f32) {
+    // 触发 Lazy：编译链接 block-area 着色器（纹理缺失时为 None，直接跳过）
+    if MATERIAL.is_none() {
+        return;
+    }
+    // 让 masks / effect / aux / scene 按当前视口尺寸全部分配好。
+    // 用一个零不透明度、但 `ready = true` 的 zone 走一遍真实代码路径：
+    // `ready` 只是为了绕过 `draw_layer_at` 开头那个 needed 早退（否则什么都分配不到），
+    // `opacity = 0` 保证画面上不留任何痕迹。
+    let dummy = [Zone {
+        center: Vector::new(0., 0.),
+        half: Vector::new(0., 0.),
+        angle: 0.,
+        invert: false,
+        active: false,
+        ready: true,
+        opacity: 0.,
+    }];
+    // disabled 分支不进触摸循环（不需要手指数据），但同样会分配 effect/aux
+    draw_layer_at(res, aspect, &dummy, 0., true, &[]);
+    // 再跑一次 enabled 分支，确保 scene 纹理（只在 !disabled 时创建）也分配好
+    draw_layer_at(res, aspect, &dummy, 0., false, &[]);
+}
+
 // Shared with the native GPU probe, which supplies a fixed Unity _Time.y.
 #[allow(dead_code)] // Also compiled directly by the hidden GPU regression example.
 pub(crate) fn draw_zones_at(res: &mut Resource, aspect: f32, zones: &[Zone], time: f32) {
