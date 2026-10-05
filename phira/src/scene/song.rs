@@ -2562,24 +2562,23 @@ impl Scene for SongScene {
                     Ok(mut items) => {
                         // 黑名单：把名单内的玩家从榜单里剔掉。
                         items.retain(|it| !crate::blacklist::contains(it.inner.player.id));
-                        // 先按服务器给的「真实 rank」取出「我的真实排名」——
-                        // 不能等下面重排后用「列表里的位置」当排名：黑名单剔除 / 服务器把我的记录
-                        // 追加到列表末尾都会让这个位置跟真实排名对不上（表现为一直显示一个固定的假名次）。
-                        let my_rank = get_data()
+                        // ⚠️ 这里**不能**把每行的 rank 重写成「在可见列表里的位置」（i + 1）！
+                        //
+                        // 榜单是「前 N 名 + 我附近的几名」两段拼起来的。前 N 名那段的
+                        // i+1 恰好等于真实名次，看不出问题；但**我附近那一段**的 i+1 会
+                        // 变成 1、2、3…，而他们实际是第几百名 —— 用户报的
+                        // 「玩家附近的几名排名还不对」就是这个。
+                        //
+                        // 另外黑名单剔除后重编号会让后面所有人集体上移（假名次）。
+                        // 正确做法：完全采用**服务器给的 rank**；剔除后留下的空号是对的
+                        // （被剔除的人本来就占着那些名次）。
+                        //
+                        // 「我的真实排名」也从服务器的 rank 取（我的记录可能被服务器追加到
+                        // 列表末尾，用列表位置当名次会一直显示一个固定假名次）。
+                        let rank = get_data()
                             .me
                             .as_ref()
                             .and_then(|me| items.iter().find(|it| it.inner.player.id == me.id).map(|it| it.rank));
-                        // 可见列表重新连续编号（黑名单剔除后不留洞），仅用于列表展示。
-                        for (i, it) in items.iter_mut().enumerate() {
-                            it.rank = (i + 1) as u32;
-                        }
-                        // 「我」那一行也显示真实排名，而不是它在可见列表里的位置。
-                        if let (Some(me), Some(r)) = (get_data().me.as_ref(), my_rank) {
-                            if let Some(it) = items.iter_mut().find(|it| it.inner.player.id == me.id) {
-                                it.rank = r;
-                            }
-                        }
-                        let rank = my_rank;
                         for item in &items {
                             UserManager::request(item.inner.player.id);
                         }

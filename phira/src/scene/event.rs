@@ -370,11 +370,13 @@ impl Scene for EventScene {
                         show_error(err.context(tl!("load-ldb-failed")));
                     }
                     Ok(mut ldb) => {
-                        // 黑名单：剔除名单内的玩家，并按可见顺序重新连续编号。
+                        // 黑名单：剔除名单内的玩家。
+                        //
+                        // ⚠️ 剔除后**不要**重新编号（原来这里是 `it.rank = (i + 1)`）——
+                        // 活动榜同样是「前 N 名 + 我附近的几名」两段拼的，重编号会把
+                        // 附近那一段的玩家显示成 1、2、3…（真实是第几百名）。
+                        // 采用服务器给的 rank；剔除后留下的空号是对的。
                         ldb.retain(|it| !crate::blacklist::contains(it.player));
-                        for (i, it) in ldb.iter_mut().enumerate() {
-                            it.rank = (i + 1) as i32;
-                        }
                         for item in ldb.iter() {
                             UserManager::request(item.player);
                         }
