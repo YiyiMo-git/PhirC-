@@ -88,7 +88,7 @@ static UIViewController *phira_root_view_controller(void) {
 /// 建 WebView 并加载内联好的单文件 HTML（必须在主线程调用）。
 ///
 /// `html` 允许为 NULL（那就只把 WebView 建出来，之后再调 `phira_webui_load_html`）。
-void phira_webui_create(const char *html, phira_webui_ipc_fn ipc_fn) {
+void phira_webui_create(const char *html, const char *init_js, phira_webui_ipc_fn ipc_fn) {
     gIpcFn = ipc_fn;
     NSString *htmlStr = (html != NULL) ? [NSString stringWithUTF8String:html] : nil;
 
@@ -115,6 +115,24 @@ void phira_webui_create(const char *html, phira_webui_ipc_fn ipc_fn) {
                                                forMainFrameOnly:YES];
         [cfg.userContentController addUserScript:us];
         [us release];
+
+        // 【关键】界面脚本（装 IPC 桥 + 绑定 5 个按钮）也**必须**以 WKUserScript 注入。
+        //
+        // ⚠️ 不能像原来那样在 Rust 侧 `create` 之后立刻 `evaluateJavaScript` ——
+        // 那一刻 `loadHTMLString` 还没完成（它是异步的），脚本会落到 about:blank 上，
+        // 真实页面一加载就把它覆盖掉。表现就是**开始界面一个按钮也点不动**
+        // （和 Android 端当初缺注入是同一类问题）。
+        //
+        // ⚠️ 这里**不能**用 `stringWithFormat:`：脚本里含有 `%` 字样（CSS 宽度等），
+        // 会被当成格式说明符。直接 `stringWithUTF8String:` 原样传入。
+        if (init_js != NULL) {
+            NSString *initStr = [NSString stringWithUTF8String:init_js];
+            WKUserScript *usInit = [[WKUserScript alloc] initWithSource:initStr
+                                                          injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
+                                                       forMainFrameOnly:YES];
+            [cfg.userContentController addUserScript:usInit];
+            [usInit release];
+        }
 
         gHandler = [[PhiraWebUIMessageHandler alloc] init];
         [cfg.userContentController addScriptMessageHandler:gHandler name:@"phira"];

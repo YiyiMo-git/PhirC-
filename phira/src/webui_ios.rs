@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub type IpcFn = extern "C" fn(*const c_char);
 
 extern "C" {
-    fn phira_webui_create(html: *const c_char, ipc_fn: IpcFn);
+    fn phira_webui_create(html: *const c_char, init_js: *const c_char, ipc_fn: IpcFn);
     fn phira_webui_set_visible(visible: c_int);
     fn phira_webui_eval(js: *const c_char);
     fn phira_webui_ready() -> c_int;
@@ -99,12 +99,16 @@ impl IosHost {
         let Some(html) = cstring(&html) else {
             return;
         };
-        unsafe { phira_webui_create(html.as_ptr(), on_ipc_cb) };
-        // 【关键】注入「装 IPC 桥 + 绑定 5 个按钮」的初始化脚本。
-        // 与 Android 同样的道理：不注入就没有按钮监听、也没有 `__phira_recv`。
-        // 脚本自身会等 DOM 就绪（DOMContentLoaded + 50×100ms 轮询）再 `bind()`，
-        // 又是幂等的，所以紧接着 create 注入是安全的。
-        Self::eval(crate::webui::START_PAGE_INIT_SCRIPT);
+        // 【关键】界面脚本（装 IPC 桥 + 绑定 5 个按钮）由 ObjC 侧以 `WKUserScript`
+        // 在 `loadHTMLString` **之前**挂进配置，随文档解析自动注入。
+        //
+        // ⚠️ 这里**绝不能**改成 create 完再 `Self::eval(...)`：`loadHTMLString` 是异步的，
+        // 那一刻页面还是空的，脚本会落在 about:blank 上被真实页面覆盖 —— 结果就是
+        // 开始界面**一个按钮都点不动**（Android 当初缺注入是同一类根因）。
+        let Some(init_js) = cstring(crate::webui::START_PAGE_INIT_SCRIPT) else {
+            return;
+        };
+        unsafe { phira_webui_create(html.as_ptr(), init_js.as_ptr(), on_ipc_cb) };
         // 与 Windows/Android 同语义：请求已发出，主场景可以把渲染交给 WebView
         crate::webui::set_webui_embedded(true);
         crate::webui::diag("已请求在 UI 线程创建 WKWebView，界面脚本已注入");
