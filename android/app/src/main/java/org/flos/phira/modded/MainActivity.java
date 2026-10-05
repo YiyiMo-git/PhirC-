@@ -102,6 +102,8 @@ class QuadSurface extends SurfaceView implements View.OnTouchListener, View.OnKe
      * 转发给 `QuadNative.surfaceOnCharacter`（miniquad 已有该 JNI 入口），
      * 删除键转发成 `surfaceOnKeyDown/Up(KEYCODE_DEL)`，「完成」键转发成 Enter。
      */
+    private static boolean gImeLogged = false;
+
     @Override
     public InputConnection onCreateInputConnection(android.view.inputmethod.EditorInfo outAttrs) {
         outAttrs.inputType = android.text.InputType.TYPE_CLASS_TEXT
@@ -109,6 +111,10 @@ class QuadSurface extends SurfaceView implements View.OnTouchListener, View.OnKe
                 | android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
         outAttrs.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
                 | android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN;
+        if (!gImeLogged) {
+            gImeLogged = true;
+            CrashLog.stage("onCreateInputConnection: 输入法已连接（可以打字了）");
+        }
         return new android.view.inputmethod.BaseInputConnection(this, false) {
             @Override
             public boolean commitText(CharSequence text, int newCursorPosition) {
@@ -122,8 +128,10 @@ class QuadSurface extends SurfaceView implements View.OnTouchListener, View.OnKe
 
             @Override
             public boolean setComposingText(CharSequence text, int newCursorPosition) {
-                // 中文等输入法会先送「组合中」的文本；一并转发，避免预编辑内容丢失。
-                return commitText(text, newCursorPosition);
+                // ⚠️ **不要**转成 commitText：拼音/中文输入时「组合中」的文本会随每次按键
+                // 回调一次，转发出去就会把同一个字重复插入。这里只吃下、不插入，
+                // 等输入法真正 commitText 时再插入。
+                return true;
             }
 
             @Override
@@ -728,9 +736,23 @@ public class MainActivity extends Activity {
                     return;
                 }
                 if (show) {
-                    if (view != null) {
-                        view.requestFocus();
-                        imm.showSoftInput(view, 0);
+                    if (view == null) {
+                        CrashLog.stage("showKeyboard: view == null");
+                        return;
+                    }
+                    view.setFocusableInTouchMode(true);
+                    view.requestFocus();
+                    boolean ok = imm.showSoftInput(view, 0);
+                    // ⚠️ 原来这里**完全不看返回值** —— showSoftInput 失败是静默的，
+                    // 表现就是「连键盘都召唤不出来」，而且事后无从查起。现在记进崩溃日志
+                    // （设置 → 日志页能看到），失败时再走强制弹出兜底。
+                    CrashLog.stage("showKeyboard(true) ok=" + ok
+                            + " focus=" + view.hasFocus()
+                            + " winFocus=" + view.hasWindowFocus()
+                            + " token=" + (view.getWindowToken() != null));
+                    if (!ok) {
+                        imm.toggleSoftInput(InputMethodManager.SHOW_FORCED, 0);
+                        CrashLog.stage("showKeyboard(true): fallback toggleSoftInput(SHOW_FORCED)");
                     }
                 } else if (view != null) {
                     imm.hideSoftInputFromWindow(view.getWindowToken(), 0);
