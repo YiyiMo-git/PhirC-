@@ -2,6 +2,18 @@ inner.rs
 
 /target
 /assets/font.ttf
+# ⚠️ 但 `/assets/font.ttf` 已被 `git add -f` 强制入库（见下方说明），
+# 这里的忽略规则对它已不再生效 —— 保留是为了万一将来想取消跟踪。
+#
+# 【为什么必须强制入库】打歌界面字体 = 这份 font.ttf（`GAME_FONT`，见 prpr/src/core.rs）。
+# 它被 ignore 时，CI 编 APK/IPA 拿不到它，会走 android.yml 的兜底：
+#   ① 从官方 APK 提取  → 官方 Phira 的字体，不是这份
+#   ② 从 mivik.moe/prpr/font.ttf 下载 → 又是另一个字体
+# 结果就是 **PC 端字体正常、移动端字体不对**（因为 PC 用本地 assets/，CI 用兜底那份）。
+# 这个坑文档里记过一次（docs/美化改版方案.md §8.5.4，当时是 Ubuntu 字体混进来），
+# 现在直接把正确文件入库根治。
+# 正确文件：13,449,192 B，SHA256 DF8E56E323F6705DB27525560F0922C89DCBC8E75EA1686F9BCCAAD4432BD276
+# （与 Phi-Recorder-1.6.1/src-tauri/assets/font.ttf 逐字节相同）
 /cache
 /data
 /.cargo
