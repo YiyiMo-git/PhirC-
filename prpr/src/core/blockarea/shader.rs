@@ -20,6 +20,7 @@ use std::cell::RefCell;
 // `blockarea/mask.rs`。加上 `#[path]` 才能把两个兄弟文件当成子模块。
 #[path = "mask.rs"]
 mod mask;
+pub use mask::{mask_divisor, set_mask_divisor};
 #[path = "touch.rs"]
 mod touch;
 

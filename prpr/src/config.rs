@@ -656,6 +656,8 @@ pub struct Config {
     /// → 面板采样）。`false` 走原来的零状态磨砂配方（柔光 + 半透明底 + 高光 + 颗粒），
     /// 完全不碰全局渲染状态。`true` 时若 RT/着色器不可用会自动回退到磨砂配方。
     pub ui_backdrop_blur: bool,
+    /// 噪区精细度：掩码分辨率除数（1 最细 / 8 最省性能）。见 `blockarea::set_mask_divisor`。
+    pub block_mask_divisor: usize,
 
     /// New UI 开始界面：透视视差是否跟随**陀螺仪 / 设备姿态**。
     /// 关掉 = 固定视角（只有设计稿那套静态透视）。桌面端没有姿态传感器时，
@@ -784,6 +786,7 @@ impl Default for Config {
 
             ui_dark: true,
             ui_backdrop_blur: false,
+            block_mask_divisor: 4,
             gyro_parallax: true,
             gyro_scale: 1.,
 

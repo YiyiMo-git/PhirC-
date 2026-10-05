@@ -1356,6 +1356,8 @@ struct ChartList {
     judge_chart_btn: DRectButton,
     health_max_btn: DRectButton,
     health_scale_slider: Slider,
+    /// 噪区精细度（掩码分辨率除数）。
+    block_mask_slider: Slider,
     health_color_btn: DRectButton,
     health_len_slider: Slider,
     motion_btn: DRectButton,
@@ -1461,6 +1463,7 @@ impl ChartList {
             judge_chart_btn: DRectButton::new(),
             health_max_btn: DRectButton::new(),
             health_scale_slider: Slider::new(0.1..5., 0.1),
+            block_mask_slider: Slider::new(1.0..8.0, 1.0),
             health_color_btn: DRectButton::new(),
             health_len_slider: Slider::new(Config::HEALTH_BAR_LEN_MIN..Config::HEALTH_BAR_LEN_MAX, 0.05),
             motion_btn: DRectButton::new(),
@@ -1582,6 +1585,13 @@ impl ChartList {
         if self.health_max_btn.touch(touch, t) {
             request_input("health_max", InputBox::new().default_text(&format!("{:.0}", config.health_max)));
             return Ok(Some(true));
+        }
+        // 噪区精细度：改完立刻生效（`render_displaced` 每帧读原子量，无需重启）。
+        let mut block_mask_divisor = config.block_mask_divisor as f32;
+        if let wt @ Some(_) = self.block_mask_slider.touch(touch, t, &mut block_mask_divisor) {
+            config.block_mask_divisor = block_mask_divisor.round().clamp(1., 8.) as usize;
+            prpr::core::set_mask_divisor(config.block_mask_divisor);
+            return Ok(wt);
         }
         if let wt @ Some(_) = self.health_scale_slider.touch(touch, t, &mut config.health_scale) {
             config.health_scale = config.health_scale.clamp(0.1, 5.);
@@ -1762,6 +1772,16 @@ impl ChartList {
             render_title(ui, tl!("item-health-max"), Some(tl!("item-health-max-sub")));
             self.health_max_btn
                 .render_text(ui, rr, t, format!("{:.0}", config.health_max), 0.5, false);
+        }
+        item! {
+            render_title(ui, tl!("item-block-mask-divisor"), Some(tl!("item-block-mask-divisor-sub")));
+            self.block_mask_slider.render(
+                ui,
+                rr,
+                t,
+                config.block_mask_divisor as f32,
+                format!("{}", config.block_mask_divisor),
+            );
         }
         item! {
             render_title(ui, tl!("item-health-scale"), Some(tl!("item-health-scale-sub")));

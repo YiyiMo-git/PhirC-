@@ -147,3 +147,7 @@ item-gyro-parallax = 陀螺儀跟隨
 item-gyro-parallax-sub = 開始畫面的透視隨裝置傾斜；桌面端用滑鼠代替
 item-gyro-scale = 陀螺儀幅度
 item-gyro-scale-sub = 透視視差跟隨的強度
+
+# 噪区精细度滑块（prpr blockarea 的 MASK_DIVISOR）
+item-block-mask-divisor = 噪區精細度
+item-block-mask-divisor-sub = 數值越小格子越細、邊緣越精細；1 最細，8 最省效能

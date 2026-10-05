@@ -362,6 +362,8 @@ impl Data {
             .retain(|local_path, _| Path::new(&format!("{charts}/{local_path}")).exists());
 
         self.config.init();
+        // 把持久化的噪区精细度应用给引擎（`blockarea` 用原子量，热路径不加锁）。
+        prpr::core::set_mask_divisor(self.config.block_mask_divisor);
         PREFER_REDUCED_MOTION.store(self.prefer_reduced_motion, Ordering::Relaxed);
         Ok(())
     }

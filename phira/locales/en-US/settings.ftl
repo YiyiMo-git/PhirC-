@@ -128,6 +128,10 @@ item-judge-chart = Result Timing Chart
 item-judge-chart-sub = Draw a judgement timing distribution chart (early ← → late) on the result screen
 item-health-max = Health Maximum
 item-health-max-sub = Maximum health of health mode (10 ~ 10000, 100 by default; you start at 70%)
+# 噪区精细度滑块（prpr blockarea 的 MASK_DIVISOR）
+item-block-mask-divisor = Noise zone detail
+item-block-mask-divisor-sub = Smaller = finer cells and sharper edges; 1 is finest, 8 is cheapest
+
 item-health-scale = Health Strength
 item-health-scale-sub = Heal / damage multiplier of health mode (1.0x by default: Perfect +1, Good +0.5, Bad -5, Miss -10)
 item-health-color = Health Bar Color
