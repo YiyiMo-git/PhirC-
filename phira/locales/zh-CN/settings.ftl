@@ -13,6 +13,7 @@ account-add = 添加账号
 account-add-sub = 输入邮箱和密码，登录后会自动保存，之后可一键切换
 account-add-btn = 添加
 account-login-btn = 登录
+account-login-unavailable = 登录界面暂时不可用，请稍后重试
 account-remove-again = 确认删除？
 account-working = 正在登录…
 account-empty = 还没有保存的账号

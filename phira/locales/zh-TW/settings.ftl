@@ -11,6 +11,7 @@ account-add = 新增帳號
 account-add-sub = 輸入信箱和密碼，登入後會自動儲存，之後可一鍵切換
 account-add-btn = 新增
 account-login-btn = 登入
+account-login-unavailable = 登入畫面暫時無法使用，請稍後重試
 account-remove-again = 確認刪除？
 account-working = 正在登入…
 account-empty = 還沒有儲存的帳號

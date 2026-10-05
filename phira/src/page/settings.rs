@@ -909,24 +909,8 @@ impl GeneralList {
             }
         }
         if let Some((id, text)) = take_input() {
-            // ---- 「账号」页：两步输入（先邮箱，再密码）----
-            // 这里只做**投递**，真正起任务在 `AccountList` 里，所以用一个模块级槽位
-            // 转手（`self` 是 `GeneralList`，拿不到 `SettingsPage::list_account`）。
-            if id == "account_email" {
-                if !text.trim().is_empty() {
-                    ACCOUNT_ADD.with(|it| *it.borrow_mut() = Some(AccountAddStep::Email(text.trim().to_owned())));
-                    request_input("account_pwd", InputBox::new().title(tl!("account-pwd-hint")));
-                }
-                return Ok(false);
-            }
-            if id == "account_pwd" {
-                ACCOUNT_ADD.with(|it| {
-                    if let Some(AccountAddStep::Email(email)) = it.borrow_mut().take() {
-                        *it.borrow_mut() = Some(AccountAddStep::Ready { email, password: text });
-                    }
-                });
-                return Ok(false);
-            }
+            // （「账号」页原来在这里做两步输入框，已改用 Phira 自带的登录界面，
+            //  见 `AccountList::ensure_login`；相关槽位与任务已一并删除。）
             if id == "mp_addr" {
                 if let Err(err) = text.to_socket_addrs() {
                     show_error(anyhow::Error::new(err).context(tl!("item-mp-addr-invalid")));
@@ -2300,22 +2284,6 @@ impl ChartUiList {
     }
 }
 
-/// 「添加账号」两步输入在 `GeneralList`（取输入）与 `AccountList`（起任务）之间的转手槽。
-///
-/// 为什么要这个：`take_input()` 只有 `GeneralList::update` 里在读（它还管着
-/// 血量上限 / 连击文字 / 课题等级等一堆输入项），而 `AccountList` 是 `SettingsPage`
-/// 的字段 —— 两者互相看不见，所以用一个模块级槽位传递。
-enum AccountAddStep {
-    /// 第一步：邮箱已填好，等密码
-    Email(String),
-    /// 两步都齐了，可以起登录任务
-    Ready { email: String, password: String },
-}
-
-thread_local! {
-    static ACCOUNT_ADD: std::cell::RefCell<Option<AccountAddStep>> = const { std::cell::RefCell::new(None) };
-}
-
 // ============================ 「账号」页 ============================
 //
 // 多账号管理：列出 `Data::accounts` 里保存过的账号，可**一键切换**、**添加**、**删除**。
@@ -2331,8 +2299,6 @@ thread_local! {
 enum AccountAction {
     /// 用保存的凭据切换账号
     Switch(String),
-    /// 用新填的邮箱 / 密码添加并登录
-    Add,
 }
 
 struct AccountList {
@@ -2340,9 +2306,9 @@ struct AccountList {
     switch_btns: Vec<DRectButton>,
     /// 每个账号一行「删除」按钮
     remove_btns: Vec<DRectButton>,
-    /// 顶部「添加账号」按钮
+    /// 顶部「登录 / 添加账号」按钮
     add_btn: DRectButton,
-    /// 去登录（未登录时显示）
+    /// 未登录时的登录入口
     login_btn: DRectButton,
     /// 退出当前账号
     logout_btn: DRectButton,
@@ -2350,13 +2316,32 @@ struct AccountList {
     task: Option<Task<Result<String>>>,
     /// 正在跑的操作类型
     action: Option<AccountAction>,
-    /// 「添加账号」第一步填好的邮箱（等第二步密码）
-    add_email: Option<String>,
     /// 刚点过「删除」、等下一次点击确认的邮箱（两步删除，避免误删）
     confirm_remove: Option<String>,
+    /// **Phira 自带的登录界面**（`crate::login::Login`）。
+    ///
+    /// 用户明确要求「用 phira 自带的登录界面」—— 那套在桌面端一直能用，
+    /// 而我之前自造的两步 `request_input` 流程坏过。这里直接复用同一个组件。
+    ///
+    /// 延迟创建：`Login::new` 需要 `Arc<Icons>`，而 `SettingsPage` 构造时
+    /// 全局 icons 不一定已就绪（用 `super::global_icons()` 取）。
+    /// 该组件**自己管理可见性**：`enter(t)` 打开，`touch`/`update` 不可见时是 no-op。
+    login: Option<crate::login::Login>,
 }
 
 impl AccountList {
+    /// 确保自带登录界面已创建（拿不到全局 icons 就返回 false）。
+    fn ensure_login(&mut self) -> bool {
+        if self.login.is_none() {
+            let Some(icons) = super::global_icons() else {
+                tracing::warn!("[account] 全局 icons 未就绪，无法打开自带登录界面");
+                return false;
+            };
+            self.login = Some(crate::login::Login::new(icons));
+        }
+        true
+    }
+
     fn new() -> Self {
         Self {
             switch_btns: Vec::new(),
@@ -2366,8 +2351,8 @@ impl AccountList {
             logout_btn: DRectButton::new(),
             task: None,
             action: None,
-            add_email: None,
             confirm_remove: None,
+            login: None,
         }
     }
 
@@ -2381,21 +2366,9 @@ impl AccountList {
                 let email = email.clone();
                 Box::pin(async move { crate::page::user::switch_account(&email).await })
             }
-            AccountAction::Add => return, // 走 `start_add`（要带密码）
         };
         self.action = Some(action);
         self.task = Some(Task::new(fut));
-    }
-
-    /// 第二步（密码）拿到后，用「邮箱 + 密码」添加并登录新账号。
-    fn start_add(&mut self, email: String, password: String) {
-        if self.task.is_some() {
-            return;
-        }
-        self.action = Some(AccountAction::Add);
-        self.task = Some(Task::new(async move {
-            crate::page::user::add_account(&email, &password).await
-        }));
     }
 
     fn top_touch(&mut self, _touch: &Touch, _t: f32) -> bool {
@@ -2403,6 +2376,12 @@ impl AccountList {
     }
 
     fn touch(&mut self, touch: &Touch, t: f32) -> Result<Option<bool>> {
+        // Phira 自带登录界面盖在最上层：它可见时优先吃掉触摸（与 home.rs 一致）
+        if let Some(login) = &mut self.login {
+            if login.touch(touch, t) {
+                return Ok(Some(true));
+            }
+        }
         let accounts = get_data().accounts.clone();
         for (i, acc) in accounts.iter().enumerate() {
             if let Some(btn) = self.switch_btns.get_mut(i) {
@@ -2435,15 +2414,23 @@ impl AccountList {
         // 点别处就取消「待确认」
         self.confirm_remove = None;
 
-        if self.add_btn.touch(touch, t) && self.task.is_none() {
-            self.add_email = None;
-            request_input("account_email", InputBox::new().title(tl!("account-email-hint")));
+        // 「登录 / 添加账号」→ 打开 **Phira 自带的登录界面**（不再用自造的输入框）
+        if self.add_btn.touch(touch, t) {
+            if self.ensure_login() {
+                if let Some(login) = &mut self.login {
+                    login.enter(t);
+                }
+            } else {
+                show_error(anyhow::anyhow!("{}", tl!("account-login-unavailable")));
+            }
             return Ok(Some(true));
         }
-        if self.login_btn.touch(touch, t) && self.task.is_none() {
-            // 未登录时直接走「添加账号」同一套流程
-            self.add_email = None;
-            request_input("account_email", InputBox::new().title(tl!("account-email-hint")));
+        if self.login_btn.touch(touch, t) {
+            if self.ensure_login() {
+                if let Some(login) = &mut self.login {
+                    login.enter(t);
+                }
+            }
             return Ok(Some(true));
         }
         if self.logout_btn.touch(touch, t) && self.task.is_none() {
@@ -2454,40 +2441,19 @@ impl AccountList {
         Ok(None)
     }
 
-    fn update(&mut self, _t: f32) -> Result<bool> {
-        // 两步输入都齐了就把登录任务起起来（见 `AccountAddStep`）
-        if self.task.is_none() {
-            // ⚠️ 不能写成 `match it.borrow_mut().take() { ... *it.borrow_mut() = ... }` ——
-            // `borrow_mut()` 的临时守卫活到整个 match 结束，在分支里再借一次会
-            // **RefCell 二次可变借用 panic**。所以先把值取出来，守卫即刻释放。
-            let step = ACCOUNT_ADD.with(|it| it.borrow_mut().take());
-            let ready = match step {
-                Some(AccountAddStep::Ready { email, password }) => Some((email, password)),
-                Some(other) => {
-                    // 还没到第二步，放回去
-                    ACCOUNT_ADD.with(|it| *it.borrow_mut() = Some(other));
-                    None
-                }
-                None => None,
-            };
-            if let Some((email, password)) = ready {
-                self.start_add(email, password);
-            }
+    fn update(&mut self, t: f32) -> Result<bool> {
+        // 自带登录界面（它自己判断是否可见；登录成功后由它写 `data.me`）
+        if let Some(login) = &mut self.login {
+            login.update(t)?;
         }
         // 异步任务收结果
         if let Some(task) = &mut self.task {
             if let Some(res) = task.take() {
                 self.task = None;
-                let was_add = matches!(self.action, Some(AccountAction::Add));
                 self.action = None;
                 match res {
                     Ok(name) => {
-                        let msg = if was_add {
-                            format!("{} {}", tl!("account-added"), name)
-                        } else {
-                            format!("{} {}", tl!("account-switched"), name)
-                        };
-                        show_message(msg).ok();
+                        show_message(format!("{} {}", tl!("account-switched"), name)).ok();
                     }
                     Err(err) => show_error(err.context(tl!("account-failed"))),
                 }
@@ -2628,6 +2594,10 @@ impl AccountList {
                 crate::newui::theme().text_dim,
                 (0., 0.5),
             );
+        }
+        // Phira 自带登录界面**画在最上层**（和 home.rs 一样，最后画 = 覆盖在上面）
+        if let Some(login) = &mut self.login {
+            login.render(ui, t);
         }
         (w, h)
     }

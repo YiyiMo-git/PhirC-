@@ -13,6 +13,7 @@ account-add = Add account
 account-add-sub = Enter email and password; it will be saved so you can switch with one tap
 account-add-btn = Add
 account-login-btn = Sign in
+account-login-unavailable = Sign-in screen is unavailable, please retry later
 account-remove-again = Confirm remove?
 account-working = Signing in…
 account-empty = No saved accounts yet

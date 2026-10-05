@@ -23,7 +23,14 @@ use tracing::{info, warn};
 
 /// 把当前登录的账号（`Data::me` + 凭据）写进 `Data::accounts`。
 ///
+/// ⚠️ 目前**没有调用点**：登录已经改用 Phira 自带的登录界面（`crate::login::Login`，
+/// 见 `page/settings.rs` 的 `AccountList::ensure_login`），而那个组件只写 `data.me`、
+/// **不暴露密码** —— 拿不到密码就存不进 `accounts`，所以「登录后自动记住以便一键切换」
+/// 这条链路暂时断了。已保存过的账号（`accounts` 里已有的）切换仍然正常。
+///
+/// 保留本函数是为了将来要么给自带登录界面加凭据回调、要么恢复一条「保存密码」的入口。
 /// 已存在同邮箱的条目就更新（改名 / 换头像 / RKS 变化都能同步）。
+#[allow(dead_code)]
 pub fn remember_account(email: &str, password: &str, name: String, avatar: String, rks: f32) {
     if email.is_empty() {
         return;
@@ -88,7 +95,10 @@ pub async fn switch_account(email: &str) -> Result<String> {
     Ok(name)
 }
 
-/// 登录一个**新**账号并保存下来（设置页「添加账号」用）。
+/// 登录一个**新**账号并保存下来。
+///
+/// ⚠️ 同 [`remember_account`]：目前没有调用点（登录已改用 Phira 自带登录界面）。
+#[allow(dead_code)]
 pub async fn add_account(email: &str, password: &str) -> Result<String> {
     if email.is_empty() || password.is_empty() {
         anyhow::bail!("邮箱和密码都不能为空");
