@@ -37,18 +37,22 @@ import java.util.Map;
  */
 public final class WebUIView {
 
-    /** Rust 侧 {@code include_bytes!} 进来的资源，键是相对路径（如 {@code assets/3.png}）。 */
-    private final Map<String, byte[]> assets = new HashMap<>();
+    /** Rust 侧 {@code include_bytes!} 进来的资源，由 {@link #ASSETS} 统一保管。 */
 
     /**
-     * 还没建立 WebView 时先存在这里的资源。
+     * 内嵌资源表（**静态共享**，Rust 推什么、WebView 就取什么）。
      *
-     * <p>Rust 是**同步**把资源推过来的（启动早期），而 WebView 必须在 UI 线程建，
-     * 建好之前 {@link #putAsset} 无处可放。所以先落在这张静态缓冲表里，
-     * {@link #create()} 时再一次性搬进实例表。这样 Rust 那边不用关心时序。
+     * <p>⚠️ 原来这里是「先缓存在 PENDING，`create()` 时搬到实例表并置
+     * `pendingFlushed`，之后忽略新资源」——那有**竞态**：
+     * `webuiCreate` 是投到 UI 线程异步执行的，而 Rust 紧接着**同步**推资源。
+     * 如果 UI 线程抢先跑完 `create()`，此时 PENDING 还是空的，
+     * `pendingFlushed` 被置真 → **之后推来的 index.html 等资源全部被静默丢弃**
+     * → 页面 404 → `onPageFinished` 照样触发 → Rust 以为就绪而交棒 → 空白/黑屏。
+     *
+     * <p>现在只有这一张静态表，不搬、不清、不设标志：Rust 推、WebView 读，
+     * 两边都加锁，不存在时序问题（谁先谁后都对）。
      */
-    private static final Map<String, byte[]> PENDING = new HashMap<>();
-    private static boolean pendingFlushed = false;
+    private static final Map<String, byte[]> ASSETS = new HashMap<>();
 
     private final Activity activity;
     private WebView webView;
@@ -81,36 +85,23 @@ public final class WebUIView {
     }
 
     /**
-     * 把一份资源放进内存表（由 Rust 启动时调用）。
+     * 把一份资源放进内存表（由 Rust 启动时调用，可能在任意线程）。
      *
-     * <p>WebView 还没建好时先进静态缓冲表，{@link #create()} 会搬过去。
-     * 这个方法由 Rust 在任何线程调用，所以两张表都要按「只增不改」的方式用，
-     * 避免和 UI 线程的 {@link #create()} 抢。
+     * <p>没有「先缓存后搬」那一套了 —— 就一张静态表，见 {@link #ASSETS} 的说明。
      */
     public static void putAssetStatic(String path, byte[] data) {
         if (path == null || data == null) return;
         String key = path.startsWith("/") ? path.substring(1) : path;
-        synchronized (PENDING) {
-            if (pendingFlushed) return; // 已经搬过了，忽略（页面早已加载）
-            PENDING.put(key, data);
+        synchronized (ASSETS) {
+            ASSETS.put(key, data);
         }
     }
 
-    private void putAssetLocal(String path, byte[] data) {
-        if (path == null || data == null) return;
-        assets.put(path.startsWith("/") ? path.substring(1) : path, data);
-    }
-
-    /** 把缓冲表里的资源搬进实例表（只在 UI 线程、且只做一次）。 */
-    private void flushPending() {
-        synchronized (PENDING) {
-            if (!pendingFlushed) {
-                for (Map.Entry<String, byte[]> e : PENDING.entrySet()) {
-                    assets.put(e.getKey(), e.getValue());
-                }
-                PENDING.clear();
-                pendingFlushed = true;
-            }
+    /** 取一份资源（给 `shouldInterceptRequest` 用）。 */
+    private static byte[] getAssetStatic(String path) {
+        String key = path.startsWith("/") ? path.substring(1) : path;
+        synchronized (ASSETS) {
+            return ASSETS.get(key);
         }
     }
 
@@ -121,8 +112,6 @@ public final class WebUIView {
     public void create() {
         if (created) return;
         created = true;
-        // Rust 在 WebView 建好之前推过来的资源，这里一次性搬进来
-        flushPending();
 
         final WebView wv = new WebView(activity);
         WebSettings s = wv.getSettings();
@@ -151,7 +140,7 @@ public final class WebUIView {
                 if (path == null) return null;
                 if (path.startsWith("/")) path = path.substring(1);
                 if (path.isEmpty()) path = "index.html";
-                byte[] data = assets.get(path);
+                byte[] data = getAssetStatic(path);
                 if (data == null) {
                     return new WebResourceResponse(
                             "text/plain", "utf-8", 404, "Not Found",

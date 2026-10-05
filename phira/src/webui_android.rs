@@ -186,8 +186,12 @@ impl AndroidHost {
 
 impl WebUiHost for AndroidHost {
     fn show(&self) {
-        self.ensure_created();
+        // 顺序很重要：**先把资源推过去，再请求建 WebView**。
+        // Java 那边现在只有一张静态资源表（不再有「先缓存后搬」的竞态），
+        // 但这个顺序能保证页面一 loadUrl 就一定能取到 index.html，
+        // 不依赖 UI 线程和游戏线程谁先跑。
         self.push_assets_once();
+        self.ensure_created();
         call_static(&WARNED_CREATE, "webuiSetVisible(true)", |env, _class| {
             env.call_static_method(
                 ACTIVITY_CLASS,
