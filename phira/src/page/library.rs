@@ -1541,13 +1541,23 @@ impl Page for LibraryPage {
         let bottom = sb.y - m.u(4.);
         let back = newui::back_rect(ui, &m);
         let compact = m.compact;
-        let head_h = m.u(58.);
+        // 顶部三行整体放大。
+        //
+        // 原来第一行 58px、第二行（右侧图标钮）46px、分类标签条 42px —— 用户反馈
+        // 「都小」，所以统一按 1.3 倍放大。所有相关的尺寸都乘 `lib_scale`，
+        // 这样图标 + 字号 + 行高会一起变大，不会出现「框大了字还小」的错位。
+        // 图标基准 18px（原设计稿值），放大后作为图标与内嵌文字的共同基准。
+        let lib_scale = if compact { 1.3 } else { 1.15 };
+        let icon_base = 18. * lib_scale;
+        let head_h = m.u(58. * lib_scale);
         let cr = ui.content_rect();
         let right = cr.right();
         let x0 = cr.x;
 
         // 分类条方向：竖屏横排（铺满整宽、只占一行），横屏竖排（左侧分类栏）
         self.tabs.set_horizontal(compact);
+        // 标签文字跟着顶部三行一起放大（量与画同步，栏宽才不会和文字对不上）
+        self.tabs.set_label_scale(lib_scale);
 
         let header;
         let strip;
@@ -1557,9 +1567,9 @@ impl Page for LibraryPage {
             let head_x = (back.right() + m.u(10.)).min(right - m.u(120.));
             header = Rect::new(head_x, top + m.u(8.), (right - head_x).max(m.u(120.)), head_h);
             let row2_y = header.bottom() + m.u(8.);
-            let row2_h = m.u(46.);
+            let row2_h = m.u(46. * lib_scale);
             let strip_y = row2_y + row2_h + m.u(10.);
-            let strip_h = m.u(42.);
+            let strip_h = m.u(42. * lib_scale);
             strip = Rect::new(x0, strip_y, right - x0, strip_h);
             let gy = strip.bottom() + m.u(10.);
             grid = Rect::new(x0, gy, right - x0, (bottom - gy).max(m.u(40.)));
@@ -1605,7 +1615,7 @@ impl Page for LibraryPage {
         };
         // 紧凑模式：图标钮另起一行（跟在顶栏下方）；横屏：与搜索框同一行（heads[1] == heads[0]）
         let action_row = if compact {
-            Rect::new(x0, header.bottom() + m.u(8.), (right - x0).max(m.u(120.)), m.u(46.))
+            Rect::new(x0, header.bottom() + m.u(8.), (right - x0).max(m.u(120.)), m.u(46. * lib_scale))
         } else {
             header
         };
@@ -1767,15 +1777,21 @@ impl LibraryPage {
         let tool_row = heads[0];
         let icons_row = heads[1];
         let _ = chosen;
+        // 顶部三行的放大倍率 / 图标基准（与 `render` 里 head_h 用的同一套公式，
+        // 保证「行高放大了、里面的图标和文字也跟着放大」）。
+        let lib_scale = if compact { 1.3 } else { 1.15 };
+        let icon_base = 18. * lib_scale;
         // 悬停判定（与 `Touch::position` 同一套世界坐标）
         let (mx, my) = newui::mouse_world();
         let mouse = vec2(mx, my);
 
         // 右侧文字入口（课题 / 自定义 RKS / 最佳榜）只在本地页、非多选、非选封面时出现
         let show_entries = is_local && !multi_select && !CHOOSE_COVER.load(Ordering::Relaxed);
-        // 右侧操作区总宽：最多 3 个 46px 图标钮 + 间距，再加三个文字入口。
+        // 右侧操作区总宽：最多 3 个图标钮 + 间距，再加三个文字入口。
         // 之前只预留 170px，导致新入口压到搜索框上（用户报的「布局塌陷」），这里一次算准。
-        let icons_w = m.u(46.) * 3. + m.u(6.) * 3.;
+        // 图标钮按放大后的尺寸算，否则改成 1.3 倍后会重新压到搜索框。
+        let icon_btn = 46. * lib_scale;
+        let icons_w = m.u(icon_btn) * 3. + m.u(6. * lib_scale) * 3.;
         let entry_w = if show_entries {
             m.u(160.) + m.u(120.) + m.u(110.) + m.u(12.)
         } else {
@@ -1804,7 +1820,7 @@ impl LibraryPage {
                 "library",
                 "search",
                 crate::hud::Cap(true, true, true),
-                Rect::new(tool_row.x, tool_row.center().y - m.u(22.), search_w, m.u(44.)),
+                Rect::new(tool_row.x, tool_row.center().y - m.u(22. * lib_scale), search_w, m.u(44. * lib_scale)),
             );
             self.search_btn.build(ui, t, sr, |ui, _path| {
                 // 搜索框 = 玻璃输入框（悬停提亮），跟设置页/开始页同一套玻璃语言
@@ -1823,16 +1839,36 @@ impl LibraryPage {
                 ui,
                 m,
                 Icon::Search,
-                Rect::new(sr.x + m.u(13.), sr.center().y - m.u(9.), m.u(18.), m.u(18.)),
+                Rect::new(
+                    sr.x + m.u(13. * lib_scale),
+                    sr.center().y - m.u(icon_base / 2.),
+                    m.u(icon_base),
+                    m.u(icon_base),
+                ),
                 th.text_mute,
                 1.7,
             );
-            let tx = sr.x + m.u(37.);
+            let tx = sr.x + m.u(37. * lib_scale);
             if self.search_str.is_empty() {
-                newui::text(ui, m, "搜索曲名或曲师…", tx, sr.center().y, 14., th.text_mute, (0., 0.5));
+                newui::text(ui, m, "搜索曲名或曲师…", tx, sr.center().y, icon_base, th.text_mute, (0., 0.5));
             } else {
-                newui::text_ellipsis(ui, m, self.search_str.clone(), tx, sr.center().y, 14., sr.right() - m.u(40.) - tx, th.text_hi, (0., 0.5));
-                let cr = Rect::new(sr.right() - m.u(32.), sr.center().y - m.u(10.), m.u(20.), m.u(20.));
+                newui::text_ellipsis(
+                    ui,
+                    m,
+                    self.search_str.clone(),
+                    tx,
+                    sr.center().y,
+                    icon_base,
+                    sr.right() - m.u(40. * lib_scale) - tx,
+                    th.text_hi,
+                    (0., 0.5),
+                );
+                let cr = Rect::new(
+                    sr.right() - m.u(32. * lib_scale),
+                    sr.center().y - m.u(icon_base * 0.55),
+                    m.u(icon_base * 1.1),
+                    m.u(icon_base * 1.1),
+                );
                 self.search_clr_btn.set(ui, cr);
                 newui::draw_icon(ui, m, Icon::X, cr.feather(-cr.w * 0.3), th.text_dim, 1.8);
             }
@@ -1889,7 +1925,9 @@ impl LibraryPage {
         {
             let mut rx = icons_row.right() - m.u(6.);
             let icon_btn = |ui: &mut Ui, rx: &mut f32, btn: &mut DRectButton, icon: Icon, active: bool, fill: Color, key: Option<&'static str>| {
-                let mut r = Rect::new(*rx - m.u(46.), icons_row.center().y - m.u(23.), m.u(46.), m.u(46.));
+                // 尺寸随顶部三行一起放大（与 heads[1] 的高度 m.u(46.*lib_scale) 对齐）
+                let side = m.u(46. * lib_scale);
+                let mut r = Rect::new(*rx - side, icons_row.center().y - side / 2., side, side);
                 // HUD 自定义布局：单个图标按钮
                 if let Some(k) = key {
                     r = crate::hud::slot_or(ui, "library", k, crate::hud::Cap(true, true, true), r);

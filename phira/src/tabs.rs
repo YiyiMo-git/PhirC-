@@ -24,6 +24,9 @@ pub struct Tabs<T> {
     /// 网格只剩一条缝。横排铺满整宽、只占一行高度，是移动端该有的样子。
     horizontal: bool,
 
+    /// 标签文字缩放（默认 1.0）。曲库页顶部整体放大时由 `set_label_scale` 设置。
+    label_scale: f32,
+
     /// 选中块的动画区间：竖排时是 `[上, 下]`，横排时是 `[左, 右]`。
     y_upper: Anim<f32>,
     y_lower: Anim<f32>,
@@ -57,6 +60,7 @@ impl<T> Tabs<T> {
                 })
                 .collect(),
             selected: 0,
+            label_scale: 1.,
             horizontal: false,
 
             y_upper: Anim::new(0.),
@@ -73,6 +77,15 @@ impl<T> Tabs<T> {
     /// 切换横排 / 竖排（竖屏用横排，见字段注释）。
     pub fn set_horizontal(&mut self, v: bool) {
         self.horizontal = v;
+    }
+
+    /// 标签文字缩放（默认 1.0）。
+    ///
+    /// 曲库页顶部三行整体放大时，标签条里的字也要跟着放大，否则会出现
+    /// 「条变高了、字还是那么小」的错位。量宽度（`label_widths`）与真正绘制
+    /// 使用**同一个**缩放，否则栏宽会和实际文字对不上。
+    pub fn set_label_scale(&mut self, v: f32) {
+        self.label_scale = v;
     }
 
     /// 竖排时每一项的高度（世界坐标）：设计稿 0.155，但必须能塞进 `strip`。
@@ -116,7 +129,7 @@ impl<T> Tabs<T> {
     pub fn label_widths(&self, ui: &mut Ui) -> Vec<f32> {
         self.items
             .iter()
-            .map(|item| ui.text((item.title)()).size(0.5).no_baseline().measure().w)
+            .map(|item| ui.text((item.title)()).size(0.5 * self.label_scale).no_baseline().measure().w)
             .collect()
     }
 
@@ -194,7 +207,7 @@ impl<T> Tabs<T> {
                 .anchor(0.5, 0.5)
                 .no_baseline()
                 .max_width(r.w - 0.015)
-                .size(if horizontal { 0.45 } else { 0.5 })
+                .size(if horizontal { 0.45 } else { 0.5 } * self.label_scale)
                 .color(c)
                 .draw();
             if horizontal {
