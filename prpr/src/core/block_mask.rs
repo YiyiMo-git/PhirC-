@@ -3,11 +3,11 @@
 use super::Zone;
 use once_cell::sync::Lazy;
 
-// 位移噪点纹理运行时读取；缺失时返回 None，noise() 退化为 0（区域仍可判定，仅视觉位移关闭）。
-static DISPLACE: Lazy<Option<image::RgbImage>> = Lazy::new(|| {
-    let bytes = crate::core::read_block_asset("assets/blockarea/BlockNoise1.png")?;
-    let source = image::load_from_memory(&bytes).ok()?.to_rgb8();
-    Some(image::imageops::flip_vertical(&source))
+static DISPLACE: Lazy<image::RgbImage> = Lazy::new(|| {
+    let source = image::load_from_memory(include_bytes!("../../../assets/blockarea/BlockNoise1.png"))
+        .unwrap()
+        .to_rgb8();
+    image::imageops::flip_vertical(&source)
 });
 
 #[derive(Default)]
@@ -32,17 +32,9 @@ pub(super) struct Masks {
     gray_pong: Vec<u8>,
 }
 
-/// 遮罩相机分辨率 = 视口 / 这个数（官方是 8，即 1/8 网格）。
-///
-/// 官方（手机）用 1/8，画面上就是 **8 像素一格**；溶解边 + 外侧辉光加起来只有约 5 个
-/// 台阶，看起来偏"粗"。桌面端有算力，这里提到 **1/4（4 像素一格）**，台阶数翻倍、
-/// 边缘更细。代价是逐像素工作量 ×4（灰阶路径只在噪区淡入的 0.5 秒内走，可接受）。
-/// 想更细可以改 2，但要先优化 `render_gray_rings` 的逐像素膨胀。
-const MASK_DIVISOR: usize = 4;
-
 impl Masks {
     pub fn render_displaced(&mut self, width: usize, height: usize, aspect: f32, zones: &[Zone], time: f32) {
-        let (bw, bh) = ((width / MASK_DIVISOR).max(1), (height / MASK_DIVISOR).max(1));
+        let (bw, bh) = ((width / 8).max(1), (height / 8).max(1));
         let (ew, eh) = (bw * 2, bh * 2);
         if self.last_dim == (ew, eh, aspect) && self.last_zones == zones && self.last_time == Some(time) {
             return;
@@ -98,12 +90,10 @@ impl Masks {
         let stride = ew.div_ceil(64);
         self.active.resize(stride * eh, 0);
         self.active.fill(0);
-        // `Compose` 的 d/t 每帧只算一次，不要丢进逐像素循环里反复重建。
-        let compose = Compose::new(time);
         for y in 0..bh {
             for x in 0..bw {
                 let uv = [(x as f32 + 0.5) / bw as f32, (y as f32 + 0.5) / bh as f32];
-                let duv = compose.uv(uv);
+                let duv = compose_uv(uv, time);
                 let sx = (duv[0] * bw as f32).floor().clamp(0., (bw - 1) as f32) as usize;
                 let sy = (duv[1] * bh as f32).floor().clamp(0., (bh - 1) as f32) as usize;
                 let i = y * bw + x;
@@ -182,33 +172,25 @@ impl Masks {
             if weight < 0.01 {
                 break;
             }
-            // 可分离 max：水平 3 抽头 -> 竖直 3 抽头，等价于 3x3 方形邻域 max，
-            // 每像素只读 6 次（原来 9 次）且去掉内层邻域双循环。多趟膨胀逐趟一致。
             for y in 0..h {
-                let base = y * w;
                 for x in 0..w {
-                    let i = base + x;
-                    let xl = x.saturating_sub(1);
-                    let xr = (x + 1).min(w - 1);
-                    self.gray_pong[i] = self.gray_ping[base + xl].max(self.gray_ping[i]).max(self.gray_ping[base + xr]);
-                }
-            }
-            for y in 0..h {
-                let base = y * w;
-                let yl = y.saturating_sub(1) * w;
-                let yr = (y + 1).min(h - 1) * w;
-                for x in 0..w {
-                    let i = base + x;
-                    let maximum = self.gray_pong[yl + x].max(self.gray_pong[i]).max(self.gray_pong[yr + x]);
+                    let i = y * w + x;
+                    let mut maximum = self.gray_ping[i];
+                    for yy in y.saturating_sub(1)..=(y + 1).min(h - 1) {
+                        for xx in x.saturating_sub(1)..=(x + 1).min(w - 1) {
+                            maximum = maximum.max(self.gray_ping[yy * w + xx]);
+                        }
+                    }
+                    self.gray_pong[i] = maximum;
                     let delta = (maximum - self.gray_ping[i]) as f32 / 255.;
                     if pass == 0 {
                         self.rgba[i * 4 + 1] = maximum - self.gray_ping[i];
                     }
                     let outside = 1. - self.rgba[i * 4] as f32 / 255.;
                     self.rgba[i * 4 + 2] = unorm(weight * (outside * delta) + self.rgba[i * 4 + 2] as f32 / 255.);
-                    self.gray_ping[i] = maximum;
                 }
             }
+            std::mem::swap(&mut self.gray_ping, &mut self.gray_pong);
         }
     }
 }
@@ -240,39 +222,18 @@ fn subtract_disabled(red: u8, green: u8) -> (f32, f32) {
     (unorm(r) as f32 / 255., unorm(g * r * 10.) as f32 / 255.)
 }
 
-/// 位移合成里**每帧只算一次**的量。
-///
-/// `d`（官方归一化方向）和 `t`（相位）原先在逐像素循环里反复重算，白白多两次
-/// `medium()` 和两次乘法；这里提到每帧算一次，`Compose::uv` 只做真正随像素变化的部分。
-#[derive(Clone, Copy)]
-pub(super) struct Compose {
-    /// mediump 精度的归一化方向
-    d: f32,
-    /// 相位：`time / 20. * 2.59`
-    t: f32,
-}
-
-impl Compose {
-    pub fn new(time: f32) -> Self {
-        Self {
-            d: medium(0.5 * medium((0.5_f32).sqrt().recip())),
-            t: time / 20. * 2.59,
-        }
-    }
-
-    /// BlockCompose pass 0, preserving the native normalized direction and ST.
-    /// Native u_xlat16_* are mediump, not full-precision CPU floats. In the
-    /// exported GLES shader the inverse length, direction, sampled noise and
-    /// centered noise are separately rounded to binary16. Keeping the warp
-    /// coordinates highp after those steps is essential at point boundaries.
-    #[inline]
-    pub fn uv(&self, uv: [f32; 2]) -> [f32; 2] {
-        let (d, dt) = (self.d, self.d * self.t);
-        let st = [uv[0] * 2.13, uv[1] * 1.02];
-        let a = medium(medium(noise([dt + st[0], dt + st[1]])) - 0.5);
-        let b = medium(medium(noise([-dt + st[0], dt + st[1]])) - 0.5);
-        [(d * a + b * -d) * 0.1 + uv[0], (d * a + b * d) * 0.1 + uv[1]]
-    }
+pub(super) fn compose_uv(uv: [f32; 2], time: f32) -> [f32; 2] {
+    // BlockCompose pass 0, preserving the native normalized direction and ST.
+    // Native u_xlat16_* are mediump, not full-precision CPU floats. In the
+    // exported GLES shader the inverse length, direction, sampled noise and
+    // centered noise are separately rounded to binary16. Keeping the warp
+    // coordinates highp after those steps is essential at point boundaries.
+    let d = medium(0.5 * medium((0.5_f32).sqrt().recip()));
+    let t = time / 20. * 2.59;
+    let st = [uv[0] * 2.13, uv[1] * 1.02];
+    let a = medium(medium(noise([d * t + st[0], d * t + st[1]])) - 0.5);
+    let b = medium(medium(noise([-d * t + st[0], d * t + st[1]])) - 0.5);
+    [(d * a + b * -d) * 0.1 + uv[0], (d * a + b * d) * 0.1 + uv[1]]
 }
 
 fn medium(value: f32) -> f32 {
@@ -283,17 +244,13 @@ fn medium(value: f32) -> f32 {
 }
 
 fn noise(uv: [f32; 2]) -> f32 {
-    let Some(displace) = DISPLACE.as_ref() else {
-        return 0.;
-    };
-    let (w, h) = (displace.width(), displace.height());
     let mirror = |v: f32, size: u32| {
         let v = v.rem_euclid(2.);
         let v = if v > 1. { 2. - v } else { v };
         (v * size as f32).floor().clamp(0., (size - 1) as f32) as u32
     };
     // Match the vertically flipped rows uploaded by the material renderer.
-    displace.get_pixel(mirror(uv[0], w), mirror(uv[1], h))[0] as f32 / 255.
+    DISPLACE.get_pixel(mirror(uv[0], DISPLACE.width()), mirror(uv[1], DISPLACE.height()))[0] as f32 / 255.
 }
 
 fn raster_rows(width: usize, height: usize, aspect: f32, zone: &Zone, mut write: impl FnMut(usize, usize, usize)) {
@@ -415,8 +372,7 @@ mod tests {
         ];
         let (width, height, aspect) = (129, 75, 16. / 9.);
         let mut masks = Masks::default();
-        // 反过来凑输入尺寸，让相机网格正好是 (width, height)
-        masks.render_displaced(width * MASK_DIVISOR, height * MASK_DIVISOR, aspect, &zones, 0.);
+        masks.render_displaced(width * 8, height * 8, aspect, &zones, 0.);
         for y in 0..height {
             for x in 0..width {
                 let p = Vector::new((x as f32 + 0.5) * 2. / width as f32 - 1., ((y as f32 + 0.5) * 2. / height as f32 - 1.) / aspect);
@@ -442,7 +398,7 @@ mod tests {
     fn exterior_rings_leave_fill_and_union_interiors_unchanged() {
         let mut masks = Masks::default();
         masks.render_displaced(800, 800, 1., &[zone(-0.2, 0., 0.3, 0.3, 0., false), zone(0.2, 0., 0.3, 0.3, 0., false)], 1.);
-        let p = ((masks.height / 2) * masks.width + masks.width / 2) * 4;
+        let p = (100 * masks.width + 100) * 4;
         assert_eq!(&masks.rgba[p..p + 4], &[255, 0, 0, 0]);
         for p in masks.rgba.chunks_exact(4) {
             if p[0] == 255 {
@@ -464,16 +420,12 @@ mod tests {
         let mut zones: Vec<_> = (0..159).map(|_| zone(2., 2., 0.1, 0.1, 0., false)).collect();
         zones.push(zone(0., 0., 0.2, 0.2, 0., false));
         masks.render_displaced(800, 800, 1., &zones, 1.);
-        let center = ((masks.height / 2) * masks.width + masks.width / 2) * 4;
-        assert_eq!(masks.rgba[center], 255);
+        assert_eq!(masks.rgba[(100 * masks.width + 100) * 4], 255);
         let previous = masks.rgba.clone();
         masks.render_displaced(800, 800, 1., &zones, 1.);
         assert_eq!(masks.rgba, previous);
         masks.render_displaced(520, 560, 1., &zones, 1.);
-        assert_eq!(
-            (masks.width, masks.height),
-            (520 / MASK_DIVISOR * 2, 560 / MASK_DIVISOR * 2)
-        );
+        assert_eq!((masks.width, masks.height), (130, 140));
     }
 
     #[test]
@@ -488,12 +440,11 @@ mod tests {
     fn native_mask_and_effect_dimensions_match_start_and_point_upsampling() {
         let mut masks = Masks::default();
         masks.render_displaced(960, 540, 16. / 9., &[zone(0., 0., 0.5, 0.25, 0., false)], 1.);
-        // 960/MASK_DIVISOR x 540/MASK_DIVISOR 的相机输出，最近邻 2 倍放大进 effect RT。
-        let (cw, ch) = (960 / MASK_DIVISOR, 540 / MASK_DIVISOR);
-        assert_eq!((masks.width, masks.height), (cw * 2, ch * 2));
-        for y in (0..ch * 2).step_by(2) {
-            for x in (0..cw * 2).step_by(2) {
-                let sample = |px: usize, py: usize| masks.rgba[(py * masks.width + px) * 4];
+        assert_eq!((masks.width, masks.height), (240, 134));
+        // The compose mask is nearest-upsampled from 120x67 into the effect RT.
+        for y in (0..134).step_by(2) {
+            for x in (0..240).step_by(2) {
+                let sample = |px: usize, py: usize| masks.rgba[(py * 240 + px) * 4];
                 assert_eq!(sample(x, y), sample(x + 1, y));
                 assert_eq!(sample(x, y), sample(x, y + 1));
             }
@@ -543,24 +494,13 @@ mod tests {
         };
         let mut mask = Masks::default();
         mask.render_displaced(128, 96, 4. / 3., &[disabled, ready], 1.);
-        // 两个区域分别在屏幕 25% / 75% 处，取它们中心那格（相机网格坐标）
-        let (cw, ch) = (mask.width / 2, mask.height / 2);
-        let at = |num: usize| {
-            // effect 是相机网格的 2 倍，所以取样点也要 ×2：num=1 -> 25%，num=3 -> 75%
-            let i = (ch * mask.width + (cw * num) / 2) * 4;
-            [mask.aux_rgba[i], mask.aux_rgba[i + 1], mask.aux_rgba[i + 2]]
-        };
-        assert_eq!(at(1), [0, 0, 255]);
-        assert_eq!(at(3), [255, 0, 255]);
+        let pixel = |x: usize| &mask.aux_rgba[(12 * mask.width + x) * 4..(12 * mask.width + x) * 4 + 4];
+        assert_eq!(&pixel(8)[..3], &[0, 0, 255]);
+        assert_eq!(&pixel(24)[..3], &[255, 0, 255]);
     }
 
     #[test]
     fn compose_displacement_animates_only_enabled_masks_and_uses_red_channel() {
-        // 官方位移贴图不在（干净检出 / CI）时跳过：没有它位移恒为 0，断言无从谈起。
-        if DISPLACE.is_none() {
-            eprintln!("skipping: assets/blockarea/BlockNoise1.png 不在，无法校验位移合成");
-            return;
-        }
         let active = zone(0., 0., 0.5, 0.2, 0., false);
         let disabled = Zone {
             active: false,
@@ -572,7 +512,7 @@ mod tests {
         mask.render_displaced(960, 540, 16. / 9., &[active, disabled], 2.);
         assert!(before.chunks_exact(4).zip(mask.rgba.chunks_exact(4)).any(|(a, b)| a[0] != b[0]));
         assert!(before.chunks_exact(4).zip(mask.rgba.chunks_exact(4)).all(|(a, b)| a[3] == b[3]));
-        let pixel = DISPLACE.as_ref().unwrap().get_pixel(0, 0);
+        let pixel = DISPLACE.get_pixel(0, 0);
         assert_eq!(noise([0.0001, 0.0001]), pixel[0] as f32 / 255.);
         assert_ne!(pixel[0], pixel[1]);
     }
@@ -589,59 +529,5 @@ mod tests {
         assert_eq!(mask.sources_rgba[3], 26);
         assert_eq!(mask.raw_disabled_green[0], 6);
         assert_eq!(mask.rgba[3], 120);
-    }
-
-    /// 诊断用（默认 ignore）：把**真实谱面**在某几个时刻的 CPU 遮罩导成 PNG，
-    /// 并把每个噪区换算回屏幕百分比打印出来，用来核对噪区边界。
-    ///
-    /// ```text
-    /// BLOCK_PROBE_CHART=<谱面.json> BLOCK_PROBE_OUT=<输出目录> \
-    ///   cargo test -p prpr --lib -- --ignored --nocapture probe_dump_masks
-    /// ```
-    #[test]
-    #[ignore = "diagnostic dump; needs BLOCK_PROBE_CHART / BLOCK_PROBE_OUT"]
-    fn probe_dump_masks() {
-        let (Ok(path), Ok(out)) = (std::env::var("BLOCK_PROBE_CHART"), std::env::var("BLOCK_PROBE_OUT")) else {
-            eprintln!("set BLOCK_PROBE_CHART / BLOCK_PROBE_OUT");
-            return;
-        };
-        let source = std::fs::read_to_string(&path).unwrap();
-        let chart = crate::parse::parse_phigros(&source, Default::default()).unwrap();
-        let aspect = 16.0f32 / 9.0;
-        let (w, h) = (1920usize, 1080usize);
-        std::fs::create_dir_all(&out).unwrap();
-        let times: Vec<f64> = std::env::var("BLOCK_PROBE_TIMES")
-            .ok()
-            .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
-            .unwrap_or_else(|| vec![85.6, 105.5, 108.0, 108.45, 110.0, 112.0, 116.0, 129.0]);
-        for t in times {
-            let zones: Vec<Zone> = chart.block_areas.iter().filter_map(|b| Zone::from_area(b, t, aspect)).collect();
-            println!("t={t}  可见噪区 {} 个", zones.len());
-            for z in &zones {
-                println!(
-                    "   center=({:.3}%,{:.3}%)  size=({:.3}%,{:.3}%)  ang={:.1}°  active={} subtract={} ready={} opacity={:.2}",
-                    (z.center.x + 1.) * 50.,
-                    (z.center.y * aspect + 1.) * 50.,
-                    z.half.x * 100.,
-                    z.half.y * aspect * 100.,
-                    z.angle.to_degrees(),
-                    z.active,
-                    z.invert,
-                    z.ready,
-                    z.opacity
-                );
-            }
-            let mut m = Masks::default();
-            m.render_displaced(w, h, aspect, &zones, t as f32);
-            let (mw, mh) = (m.width, m.height);
-            for (idx, name) in ["compose", "edge", "glow", "disabled"].iter().enumerate() {
-                let plane: Vec<u8> = m.rgba.chunks_exact(4).flat_map(|p| [p[idx], p[idx], p[idx], 255]).collect();
-                image::RgbaImage::from_raw(mw as u32, mh as u32, plane)
-                    .unwrap()
-                    .save(format!("{out}/mask-{t}-{name}.png"))
-                    .unwrap();
-            }
-            println!("   -> {out}/mask-{t}-*.png  ({mw}x{mh})");
-        }
     }
 }

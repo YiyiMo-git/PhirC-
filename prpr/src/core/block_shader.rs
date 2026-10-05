@@ -63,28 +63,24 @@ impl Zone {
     }
 }
 
-// 纹理在运行时从 assets/blockarea/ 读取（官方 Phigros 客户端提取，
-// 见 scripts/extract_blockarea_assets.py）；缺失时返回 None，
-// 整条噪区渲染降级为纯色红色矩形（见 draw_layer_at 的兜底分支），不会崩溃。
-fn tex(path: &str, wrap: TextureWrap) -> Option<Texture2D> {
+fn tex(bytes: &[u8], wrap: TextureWrap) -> Texture2D {
     // Exported PNG rows are top-down; Unity GLES samples these texture assets
     // with (0,0) at their bottom-left. Macroquad uploads image bytes unchanged.
-    let bytes = super::read_block_asset(path)?;
-    let source = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    let source = image::load_from_memory(bytes).unwrap().to_rgba8();
     let source = image::imageops::flip_vertical(&source);
     let texture = Texture2D::from_rgba8(source.width() as u16, source.height() as u16, source.as_raw());
     texture.set_filter(FilterMode::Nearest);
     texture
         .raw_miniquad_texture_handle()
         .set_wrap(unsafe { get_internal_gl() }.quad_context, wrap);
-    Some(texture)
+    texture
 }
 
-static DISPLACE_TEX: Lazy<Option<Texture2D>> = Lazy::new(|| tex("assets/blockarea/BlockNoise1.png", TextureWrap::Mirror));
-static SPARK_TEX: Lazy<Option<Texture2D>> = Lazy::new(|| tex("assets/blockarea/PointNoise.png", TextureWrap::Repeat));
+static DISPLACE_TEX: Lazy<Texture2D> = Lazy::new(|| tex(include_bytes!("../../../assets/blockarea/BlockNoise1.png"), TextureWrap::Mirror));
+static SPARK_TEX: Lazy<Texture2D> = Lazy::new(|| tex(include_bytes!("../../../assets/blockarea/PointNoise.png"), TextureWrap::Repeat));
 // This PNG is regenerated from original RGB565 with full 5/6-bit replication.
 // The initial exporter only shifted bits, which darkened the hover dissolve.
-static NOISE_TEX: Lazy<Option<Texture2D>> = Lazy::new(|| tex("assets/blockarea/FD_Noise_00000.png", TextureWrap::Mirror));
+static NOISE_TEX: Lazy<Texture2D> = Lazy::new(|| tex(include_bytes!("../../../assets/blockarea/FD_Noise_00000.png"), TextureWrap::Mirror));
 
 // Typed f32 values are essential: this macroquad fork rejects f64 for Float1.
 // Keep these uniforms, rather than folding their values into GLSL, so that the
@@ -208,11 +204,6 @@ fn load_block_material(disabled: bool) -> Result<Material, miniquad::ShaderError
 }
 
 static MATERIAL: Lazy<Option<[Material; 2]>> = Lazy::new(|| {
-    // 纹理缺失（尚未从官方 APK 提取 assets/blockarea/）时整体降级，避免编译/运行崩溃。
-    if DISPLACE_TEX.is_none() || SPARK_TEX.is_none() || NOISE_TEX.is_none() {
-        tracing::warn!("block-area textures missing (assets/blockarea/), falling back to flat red overlay");
-        return None;
-    }
     (|| Ok([load_block_material(true)?, load_block_material(false)?]))()
         .map_err(|e: miniquad::ShaderError| {
             tracing::warn!("block-area shader failed: {e}");
@@ -297,7 +288,7 @@ pub(crate) fn draw_layer_at(res: &mut Resource, aspect: f32, zones: &[Zone], tim
         let texture = pass.texture(gl.quad_context);
         (texture.width as f32, texture.height as f32)
     } else {
-        (screen_width(), screen_height())
+        gl.quad_context.screen_size()
     };
     let viewport = gl.quad_gl.get_viewport().unwrap_or((0, 0, width as i32, height as i32));
     gl.flush();
@@ -382,12 +373,12 @@ pub(crate) fn draw_layer_at(res: &mut Resource, aspect: f32, zones: &[Zone], tim
         if !disabled {
             copy_scene(res, pass, viewport, scene);
         }
-        m.set_texture("uDisplaceTex", DISPLACE_TEX.unwrap());
-        m.set_texture("uSparkTex", SPARK_TEX.unwrap());
+        m.set_texture("uDisplaceTex", *DISPLACE_TEX);
+        m.set_texture("uSparkTex", *SPARK_TEX);
         m.set_texture("uMasks", frame.effect.unwrap());
         m.set_texture("uScene", scene);
         m.set_texture("uAuxMasks", frame.aux.unwrap());
-        m.set_texture("uNoiseTex", NOISE_TEX.unwrap());
+        m.set_texture("uNoiseTex", *NOISE_TEX);
         m.set_uniform("uUnityTime", vec4(time / 20., time, time * 2., time * 3.));
         m.set_uniform("uView", vec3(width as f32, height as f32, aspect));
         m.set_uniform("_ScreenParams", vec4(width as f32, height as f32, 1. + 1. / width as f32, 1. + 1. / height as f32));

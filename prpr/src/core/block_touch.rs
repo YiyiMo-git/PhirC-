@@ -59,19 +59,14 @@ pub(super) struct TouchMask {
 
 impl Default for TouchMask {
     fn default() -> Self {
-        // 触摸悬停纹理运行时读取；缺失时用 1×1 透明源，sample() 恒为 0（优雅降级）。
-        let (width, height, source) = crate::core::read_block_asset("assets/blockarea/TouchHover.png")
-            .and_then(|bytes| image::load_from_memory(&bytes).ok())
-            .map(|img| {
-                let img = img.to_rgba8();
-                (img.width() as usize, img.height() as usize, img.into_raw())
-            })
-            .unwrap_or_else(|| (1, 1, vec![0, 0, 0, 0]));
+        let source = image::load_from_memory(include_bytes!("../../../assets/blockarea/TouchHover.png"))
+            .expect("official touch hover source")
+            .to_rgba8();
         Self {
             slots: [Slot::default(); MAX_TOUCHES],
-            width,
-            height,
-            source,
+            width: source.width() as usize,
+            height: source.height() as usize,
+            source: source.into_raw(),
             last_time: None,
         }
     }
@@ -118,15 +113,15 @@ impl TouchMask {
         }
     }
 
-    pub fn visible(&self) -> bool {
-        self.slots.iter().any(|slot| slot.finger.is_some() || slot.scale > 0.0)
+    /// Convenience for deterministic probes whose list has stable order.
+    #[cfg(test)]
+    pub fn update_positions(&mut self, touches: &[Vec2], time: f32) {
+        let fingers: Vec<_> = touches.iter().copied().enumerate().map(|(index, point)| (index as u64, point)).collect();
+        self.update_fingers(&fingers, time);
     }
 
-    /// 官方悬停贴图是否就位。缺失时用的是 1×1 透明占位源，采样恒为 0。
-    /// 干净检出（CI）没有 `assets/blockarea/`，下面的断言只能在本机跑。
-    #[cfg(test)]
-    pub fn has_source(&self) -> bool {
-        self.width > 1 && self.height > 1
+    pub fn visible(&self) -> bool {
+        self.slots.iter().any(|slot| slot.finger.is_some() || slot.scale > 0.0)
     }
 
     /// R8 value at one native touch-camera pixel center. The caller duplicates
@@ -179,10 +174,6 @@ mod tests {
     #[test]
     fn official_bitmap_show_and_hide_use_native_scale() {
         let mut touch = TouchMask::default();
-        if !touch.has_source() {
-            eprintln!("skipping: assets/blockarea/TouchHover.png 不在，无法校验官方位图");
-            return;
-        }
         let center = Vec2::new(0.5, 0.5);
         let edge = center + Vec2::new(0.0, 0.2);
         touch.update_fingers(&[(42, center)], 0.0);
@@ -203,10 +194,6 @@ mod tests {
     #[test]
     fn finger_reordering_does_not_restart_show_and_overlap_is_source_over() {
         let mut touch = TouchMask::default();
-        if !touch.has_source() {
-            eprintln!("skipping: assets/blockarea/TouchHover.png 不在，无法校验官方位图");
-            return;
-        }
         let center = Vec2::new(0.5, 0.5);
         touch.update_fingers(&[(1, center), (2, center)], 1.0);
         touch.update_fingers(&[(2, center), (1, center)], 1.1);
@@ -218,10 +205,6 @@ mod tests {
     #[test]
     fn disappearing_slots_restart_from_zero_when_reused() {
         let mut touch = TouchMask::default();
-        if !touch.has_source() {
-            eprintln!("skipping: assets/blockarea/TouchHover.png 不在，无法校验官方位图");
-            return;
-        }
         let center = Vec2::new(0.5, 0.5);
         touch.update_fingers(&[(1, center)], 0.0);
         touch.update_fingers(&[(1, center)], 0.1);
