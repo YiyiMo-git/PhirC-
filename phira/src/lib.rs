@@ -35,6 +35,11 @@ mod tags;
 mod threed;
 mod uml;
 mod webui;
+/// 开始页内嵌资源表（跨平台共用；Windows 走自定义协议、Android 走 Java 内存表）。
+#[cfg(feature = "webui")]
+mod webui_assets;
+#[cfg(all(target_os = "android", feature = "webui"))]
+mod webui_android;
 #[cfg(all(target_os = "windows", feature = "webui"))]
 mod webui_windows;
 
@@ -799,6 +804,30 @@ pub extern "C" fn Java_quad_1native_QuadNative_onMotion(_env: EnvUnowned, _class
 #[no_mangle]
 pub extern "C" fn Java_quad_1native_QuadNative_onTilt(_env: EnvUnowned, _class: JClass, x: jni::sys::jfloat, y: jni::sys::jfloat) {
     prpr::scene::set_motion_tilt(x, y);
+}
+
+/* ------------------------- WebView 开始界面（Android） ------------------------- */
+
+/// JS → Rust 的一条 IPC 消息（由 `WebUIView.Bridge.postMessage` 转发过来）。
+///
+/// 处理完由 `webui_android::on_ipc` 把回包 eval 回页面。
+#[cfg(all(target_os = "android", feature = "webui"))]
+#[no_mangle]
+pub extern "C" fn Java_quad_1native_QuadNative_webuiIpc(mut env: EnvUnowned, _class: JClass, json: JString) {
+    if let Some(json) = read_java_string(&mut env, &json, "webuiIpc") {
+        crate::webui_android::on_ipc(json);
+    }
+}
+
+/// Java 侧查询 WebView 是否已经建好。
+#[cfg(all(target_os = "android", feature = "webui"))]
+#[no_mangle]
+pub extern "C" fn Java_quad_1native_QuadNative_webuiReady(_env: EnvUnowned, _class: JClass) -> jni::sys::jboolean {
+    if crate::webui_android::is_ready() {
+        jni::sys::JNI_TRUE
+    } else {
+        jni::sys::JNI_FALSE
+    }
 }
 
 /// Credentials obtained from the native HYKB (好游快爆) login SDK.

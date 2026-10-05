@@ -185,6 +185,8 @@ public class MainActivity extends Activity {
 
     private SensorManager sensorManager;
     private Sensor motionSensor;
+    /** WebView 开始界面宿主（webui feature）。Rust 通过静态方法驱动它。 */
+    private static WebUIView webUIView;
     /** 监听器是否在注册状态（unregister 之后还能再注册回来） */
     private boolean motionRegistered = false;
     /** 平滑后的摇动强度（g），避免单帧抖动导致误判 */
@@ -276,6 +278,61 @@ public class MainActivity extends Activity {
                 CrashLog.error("native 调用失败: " + name, t);
             }
         }
+    }
+
+    // ---- WebView 开始界面：供 Rust 通过 JNI 调用的静态入口 ----
+    //
+    // 符号：Java_org_1flos_1phira_1modded_MainActivity_webui*
+    // Rust 侧只关心「建好没有 / 灌资源 / 切可见 / 执行 JS / 加载首页」。
+
+    /** 在 UI 线程创建 WebView（幂等）。 */
+    public static void webuiCreate(final Activity activity) {
+        if (activity == null) return;
+        activity.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    if (webUIView == null) {
+                        webUIView = new WebUIView((MainActivity) activity);
+                    }
+                    webUIView.create();
+                } catch (Throwable t) {
+                    CrashLog.error("webuiCreate failed", t);
+                }
+            }
+        });
+    }
+
+    /** 把一份内嵌资源交给 WebView（WebView 未就绪时先进静态缓冲表）。 */
+    public static void webuiPutAsset(String path, byte[] data) {
+        WebUIView.putAssetStatic(path, data);
+    }
+
+    /** 加载首页（幂等）。 */
+    public static void webuiLoadHome() {
+        WebUIView v = webUIView;
+        if (v != null) v.loadHome();
+    }
+
+    public static void webuiSetVisible(final boolean visible) {
+        WebUIView v = webUIView;
+        if (v != null) v.setVisible(visible);
+    }
+
+    public static void webuiEval(String js) {
+        WebUIView v = webUIView;
+        if (v != null) v.evaluate(js);
+    }
+
+    public static boolean webuiReady() {
+        WebUIView v = webUIView;
+        return v != null;
+    }
+
+    public static void webuiDestroy() {
+        WebUIView v = webUIView;
+        webUIView = null;
+        if (v != null) v.destroy();
     }
 
     @Override
@@ -490,6 +547,12 @@ public class MainActivity extends Activity {
         super.onDestroy();
         InputBox.setActivity(null);
         CrashLog.stage("[exit] onDestroy（正常退出）");
+        // WebView 必须显式销毁，否则它持有的 Activity 引用会泄漏
+        try {
+            webuiDestroy();
+        } catch (Throwable t) {
+            CrashLog.error("webuiDestroy failed", t);
+        }
         if (gameStarted) {
             call("prprActivityOnDestroy", () -> QuadNative.prprActivityOnDestroy());
             call("activityOnDestroy", () -> QuadNative.activityOnDestroy());

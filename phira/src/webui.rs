@@ -144,8 +144,14 @@ impl WebUiHost for StubHost {
     fn shutdown(&self) {}
 }
 
-/// 创建 WebView 宿主。默认用 `StubHost`；Windows 且启用 `webui` feature 时
-/// 尝试创建 wry 宿主（失败则回退到 StubHost，保证启动不崩）。
+/// 创建 WebView 宿主。
+///
+/// 平台分发：
+/// - **Windows**：wry 子窗口挂 HWND（`webui_windows`），走 `webui://` 自定义协议；
+/// - **Android**：系统 `WebView` 叠在 QuadSurface 上（`webui_android`），走 JNI；
+/// - 其余平台 / 关掉 `webui` feature：`StubHost`，界面走原有 Rust UI。
+///
+/// 失败一律回退到 `StubHost`，保证启动不崩。
 pub fn init_host() {
     #[cfg(all(target_os = "windows", feature = "webui"))]
     {
@@ -169,7 +175,27 @@ pub fn init_host() {
         }
         return;
     }
-    #[cfg(not(all(target_os = "windows", feature = "webui")))]
+    #[cfg(all(target_os = "android", feature = "webui"))]
+    {
+        match crate::webui_android::AndroidHost::new() {
+            Ok(host) => {
+                *WEBUI_HOST.lock().unwrap() = Some(Box::new(host));
+                // 与 Windows 同理：这里还不算「已嵌入」。Android 的 WebView 是在
+                // UI 线程异步建的（第一次 show() 时触发），所以也要等 Java 侧确认。
+                tracing::info!("[webui] Android WebView 宿主已创建，等待首次显示时建 WebView");
+            }
+            Err(err) => {
+                tracing::error!("[webui] Android WebView 宿主创建失败，回退到原生 UI：{err:?}");
+                *WEBUI_HOST.lock().unwrap() = Some(Box::new(StubHost));
+                WEBUI_EMBEDDED.store(false, Ordering::Relaxed);
+            }
+        }
+        return;
+    }
+    #[cfg(not(any(
+        all(target_os = "windows", feature = "webui"),
+        all(target_os = "android", feature = "webui")
+    )))]
     {
         *WEBUI_HOST.lock().unwrap() = Some(Box::new(StubHost));
         WEBUI_EMBEDDED.store(false, Ordering::Relaxed);

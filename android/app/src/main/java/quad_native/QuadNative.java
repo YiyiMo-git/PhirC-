@@ -69,4 +69,16 @@ public class QuadNative {
     /** 兜底启动：万一宿主 miniquad 版本没有在 activityOnCreate 里启动游戏，
      *  由 Java 主动调一次（Rust 侧有幂等保护，不会被启动两次）。 */
     public native static void startApp();
+
+    // ---- WebView 开始界面（webui feature）----
+    //
+    // Rust 侧符号：Java_quad_1native_QuadNative_webui*
+    // WebView 就绪后，JS 的 window.AndroidBridge.postMessage(json) 会打到
+    // WebUIView.Bridge，再由 WebUIView 转调 webuiIpc，最终进 Rust 的 handle_ipc。
+
+    /** JS → Rust 的一条 IPC 消息（JSON 字符串）；Rust 处理完把回包 eval 回页面。 */
+    public native static void webuiIpc(String json);
+
+    /** Rust → Java：WebView 是否已经创建并加载完成（决定要不要把画面交给它）。 */
+    public native static boolean webuiReady();
 }

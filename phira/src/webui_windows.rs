@@ -130,8 +130,10 @@ impl WebUiHost for WryHost {
 /// 注意：
 /// - 用 `addEventListener` **追加**监听，绝不 `removeEventListener`，不动原文件自己的占位监听；
 /// - 初始化脚本可能在 DOM 之前执行，所以 DOMContentLoaded + 短轮询双重兜底再挂载；
-/// - 幂等：重复注入 / 重复挂载都用标记位挡掉。
-const START_PAGE_INIT_SCRIPT: &str = r#"
+/// - 幂等：重复注入 / 重复挂载都用标记位挡掉；
+/// - **IPC 出口按平台自动选**（与 `ui/bridge.js` 的平台分支一致）：
+///   Windows/wry 走 `window.ipc`，Android 走 `window.AndroidBridge`，iOS 走 `webkit.messageHandlers`。
+pub(crate) const START_PAGE_INIT_SCRIPT: &str = r#"
 (function () {
   'use strict';
   if (window.__phiraStartPageBridgeInstalled) return;
@@ -140,16 +142,32 @@ const START_PAGE_INIT_SCRIPT: &str = r#"
   var seq = 0;
   var pending = {};
 
+  /* ---------- 按平台选 IPC 出口（与 ui/bridge.js 的分支一致） ---------- */
+  function post(json) {
+    if (window.ipc && typeof window.ipc.postMessage === 'function') {
+      window.ipc.postMessage(json);
+      return true;
+    }
+    if (window.AndroidBridge && typeof window.AndroidBridge.postMessage === 'function') {
+      window.AndroidBridge.postMessage(json);
+      return true;
+    }
+    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.phira
+        && typeof window.webkit.messageHandlers.phira.postMessage === 'function') {
+      window.webkit.messageHandlers.phira.postMessage(json);
+      return true;
+    }
+    return false;
+  }
+
   /* ---------- 最小 invoke（形状与 ui/bridge.js 一致：{id, cmd, args}） ---------- */
   function invoke(cmd, args) {
     return new Promise(function (resolve, reject) {
       var id = ++seq;
       pending[id] = { resolve: resolve, reject: reject };
-      try {
-        window.ipc.postMessage(JSON.stringify({ id: id, cmd: cmd, args: args || {} }));
-      } catch (e) {
+      if (!post(JSON.stringify({ id: id, cmd: cmd, args: args || {} }))) {
         delete pending[id];
-        reject(e);
+        reject(new Error('IPC 桥不可用（不在 WebView 里？）'));
         return;
       }
       // 超时兜底，避免 Promise 永远挂着（与 bridge.js 一致：20s）
@@ -433,35 +451,11 @@ fn load_local_cover(chart_path: &str) -> Option<Vec<u8>> {
 }
 
 /// 内嵌资源表：把 `phira/ui/` 下的文件打进二进制。
-/// 文本用 `include_str!`，图片用 `include_bytes!`。
+///
+/// 资源本身与平台无关，已提到 [`crate::webui_assets`] 共用（Android 侧也走同一张表），
+/// 这里只做一次转发，避免两份 `include_str!`。
 fn load_asset(path: &str) -> Option<(Vec<u8>, &'static str)> {
-    let (text, mime) = match path {
-        "index.html" => (include_str!("../ui/index.html"), "text/html; charset=utf-8"),
-        "style.css" => (include_str!("../ui/style.css"), "text/css; charset=utf-8"),
-        "app.js" => (include_str!("../ui/app.js"), "text/javascript; charset=utf-8"),
-        "bridge.js" => (include_str!("../ui/bridge.js"), "text/javascript; charset=utf-8"),
-        _ => return load_binary_asset(path),
-    };
-    Some((text.as_bytes().to_vec(), mime))
-}
-
-#[cfg(feature = "webui")]
-fn load_binary_asset(path: &str) -> Option<(Vec<u8>, &'static str)> {
-    // include_bytes! 各自带具体数组长度，直接用会在 match 里产生「长度不同的 &[u8; N]」冲突；
-    // 用 .as_slice() 把它们统一成 &[u8]，再 to_vec() 成 Vec<u8>。
-    let (data, mime) = match path {
-        "assets/TriGridBase.png" => (include_bytes!("../ui/assets/TriGridBase.png").as_slice(), "image/png"),
-        "assets/phirc.png" => (include_bytes!("../ui/assets/phirc.png").as_slice(), "image/png"),
-        "assets/3.png" => (include_bytes!("../ui/assets/3.png").as_slice(), "image/png"),
-        "assets/cmdysj.ttf" => (include_bytes!("../ui/assets/cmdysj.ttf").as_slice(), "font/ttf"),
-        _ => return None,
-    };
-    Some((data.to_vec(), mime))
-}
-
-#[cfg(not(feature = "webui"))]
-fn load_binary_asset(_path: &str) -> Option<(Vec<u8>, &'static str)> {
-    None
+    crate::webui_assets::load_asset(path)
 }
 
 /// 取游戏窗口客户区的**逻辑**尺寸（CSS 像素），供 `with_bounds` 使用。

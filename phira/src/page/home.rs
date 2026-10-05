@@ -39,6 +39,9 @@ use tracing::{info, warn};
 
 type BoldFontUpdateTask = Task<Result<Option<(FontArc, String)>>>;
 
+/// 双击判定窗口（秒）：两次点击间隔小于它才算双击。
+const DOUBLE_CLICK_WINDOW: f32 = 0.4;
+
 #[derive(Deserialize)]
 struct Version {
     version: semver::Version,
@@ -97,8 +100,10 @@ pub struct HomePage {
     /// 按压回弹：点击后按钮向右冲一下再回落。
     panel_press_i: usize,
     panel_press_p: Anim<f32>,
-    /// 左侧立绘区（点了展开角色详情）。
+    /// 左侧立绘区（单击展开角色详情，**双击换立绘**）。
     art_btn: RectButton,
+    /// 上一次点立绘的时刻，用来识别双击。
+    char_pick_last: Option<f32>,
     /// 菜单里点了「退出」。
     quit: bool,
     /// 进场时刻（设计稿 `.enter` 的交错入场动画）。
@@ -194,6 +199,7 @@ impl HomePage {
             panel_press_i: 0,
             panel_press_p: Anim::new(0.),
             art_btn: RectButton::new(),
+            char_pick_last: None,
             quit: false,
             enter_t: f32::NEG_INFINITY,
             first_enter: true,
@@ -1292,6 +1298,17 @@ impl Page for HomePage {
             return Ok(true);
         }
         if self.art_btn.touch(touch) {
+            // 立绘区**双击** → 打开相册换立绘（系统文件选择器，id 与设置页一致）。
+            // 单击仍是原行为：展开 / 收起角色详情。
+            // （同一块矩形只用一个 RectButton 判定，避免两个按钮抢同一次点击。）
+            if let Some(last) = self.char_pick_last {
+                if rt - last < DOUBLE_CLICK_WINDOW {
+                    self.char_pick_last = None;
+                    prpr::scene::request_file("home_char");
+                    return Ok(true);
+                }
+            }
+            self.char_pick_last = Some(rt);
             if !self.char_screen_p.transiting(rt) {
                 let to = if self.char_screen_p.now(rt) < 0.5 {
                     self.char_text_start = rt;
@@ -1515,6 +1532,26 @@ impl Page for HomePage {
         }
         if JUST_LOADED_TOS.fetch_and(false, Ordering::Relaxed) {
             check_read_tos_and_policy(true, true);
+        }
+        // 立绘双击换图：系统文件选择器返回后，把图复制到 <data>/char.img 再重新加载
+        // （与设置页「导入立绘」同一套落盘位置，两边改的是同一份文件）。
+        if let Some((id, file)) = prpr::scene::take_file() {
+            if id == "home_char" {
+                let dst = dir::root().map(|it| format!("{it}/char.img"));
+                match dst.and_then(|dst| -> Result<()> {
+                    std::fs::copy(&file, &dst)?;
+                    Ok(())
+                }) {
+                    Ok(()) => {
+                        self.char_cached_size = 0.;
+                        self.load_char_illu();
+                        prpr::scene::show_message(tl!("char-imported")).ok();
+                    }
+                    Err(err) => show_error(err.context("立绘导入失败")),
+                }
+            } else {
+                prpr::scene::return_file(id, file);
+            }
         }
 
         Ok(())

@@ -186,9 +186,10 @@ jobs:
         run: |
           set -euo pipefail
           # video 功能需要 FFmpeg 静态库（上游的 iOS 包是坏的），这里同样用
-          # --no-default-features 关掉 video，先保证能出包
+          # --no-default-features 关掉 video；--features webui 开启 WebView 开始页
+          # （Android 走 phira/src/webui_android.rs 的 JNI 宿主，本地交叉编译已验证）。
           cargo ndk -t ${{ env.PHIRA_ANDROID_ABI }} -o android/app/src/main/jniLibs \
-            build --release -p phira --no-default-features
+            build --release -p phira --no-default-features --features webui
           JNI="android/app/src/main/jniLibs/${{ env.PHIRA_ANDROID_ABI }}"
           ls -lh "$JNI/"
           file "$JNI/libphira.so"
