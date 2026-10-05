@@ -192,6 +192,86 @@ pub struct SettingsPage {
     icon: SafeTexture,
 }
 
+/// 处理所有「设置里的文本输入框」回调（`request_input` 的返回）。
+///
+/// ⚠️ 必须是**页级**的自由函数，不能放进某个 `*List::update` 里。
+/// `take_input()` 是**全局消费式**的，而 `SettingsPage::update` 只会调用
+/// **当前选中标签页**的 `update` —— 历史上这段在 `GeneralList` 里，于是：
+///   * 「连击文字」的按钮在**谱面UI**页 → 在那一页输入的内容**永远被丢弃**（输不进去）；
+///   * 「自定义 RKS」「血量上限」「课题等级」同样是别的标签页的项，也一律失效。
+/// 提到页级后与当前标签页无关，全部恢复。
+fn handle_settings_inputs() -> Result<bool> {
+    let Some((id, text)) = take_input() else {
+        return Ok(false);
+    };
+    let data = get_data_mut();
+        // （「账号」页原来在这里做两步输入框，已改用 Phira 自带的登录界面，
+        //  见 `AccountList::ensure_login`；相关槽位与任务已一并删除。）
+        if id == "mp_addr" {
+            if let Err(err) = text.to_socket_addrs() {
+                show_error(anyhow::Error::new(err).context(tl!("item-mp-addr-invalid")));
+                return Ok(false);
+            } else {
+                data.config.mp_address = text;
+                return Ok(true);
+            }
+        } else if id == "anys_gateway" {
+            if let Err(err) = Url::parse(&text) {
+                show_error(anyhow::Error::new(err).context(tl!("item-anys-gateway-invalid")));
+                return Ok(false);
+            } else {
+                data.anys_gateway = text.trim_end_matches('/').to_string();
+                return Ok(true);
+            }
+        } else if id == "rks" {
+            let text = text.trim();
+            // 留空 = 跟随账号真实 rks
+            if text.is_empty() {
+                data.config.rks_override = None;
+                return Ok(true);
+            }
+            match text.parse::<f32>() {
+                Ok(v) if (0. ..=100.).contains(&v) => {
+                    data.config.rks_override = Some(v);
+                    return Ok(true);
+                }
+                _ => {
+                    show_error(anyhow::anyhow!("{}", tl!("rks-invalid")));
+                    return Ok(false);
+                }
+            }
+        } else if id == "health_max" {
+            match text.trim().parse::<f32>() {
+                Ok(v) if (10. ..=10000.).contains(&v) => {
+                    data.config.health_max = v;
+                    return Ok(true);
+                }
+                _ => {
+                    show_error(anyhow::anyhow!("{}", tl!("health-max-invalid")));
+                    return Ok(false);
+                }
+            }
+        } else if id == "combo_text" {
+            // 留空 = 默认（Autoplay 时 AUTOPLAY，否则 COMBO）
+            data.config.combo_text = text.trim().chars().take(Config::COMBO_TEXT_MAX_CHARS).collect();
+            return Ok(true);
+        } else if id == "challenge_rank" {
+            match text.trim().parse::<u32>() {
+                Ok(v) if v <= 999 => {
+                    data.config.challenge_rank = v;
+                    return Ok(true);
+                }
+                _ => {
+                    show_error(anyhow::anyhow!("{}", tl!("challenge-rank-invalid")));
+                    return Ok(false);
+                }
+            }
+        } else {
+            return_input(id, text);
+        }
+    Ok(false)
+}
+
 impl SettingsPage {
     const SAVE_TIME: f32 = 0.5;
 
@@ -282,6 +362,13 @@ impl Page for SettingsPage {
 
     fn update(&mut self, s: &mut SharedState) -> Result<()> {
         let t = s.t;
+        // ⚠️ 输入回调必须在**页级**处理，不能只靠当前标签页的 `update`。
+        //
+        // 这里必须**先**于下面的 `match` 执行：`take_input()` 是全局消费式的，
+        // 而被消费的输入可能来自**任意**标签页（比如「连击文字」的按钮在谱面UI页、
+        // 处理逻辑却在通用页）——只调用当前页的 `update` 会让输入直接丢失。
+        let input_changed = handle_settings_inputs()?;
+
         let changed = match self.tabs.selected() {
             SettingListType::General => self.list_general.update(t)?,
             SettingListType::Account => self.list_account.update(t)?,
@@ -291,7 +378,7 @@ impl Page for SettingsPage {
             SettingListType::Debug => self.list_debug.update(t)?,
             SettingListType::Log => self.list_log.update(t)?,
             SettingListType::About => false,
-        };
+        } || input_changed;
         self.scroll.update(t);
         if changed {
             self.save_time = t;
@@ -925,72 +1012,6 @@ impl GeneralList {
                     return Ok(false);
                 }
                 _ => return_file(id, file),
-            }
-        }
-        if let Some((id, text)) = take_input() {
-            // （「账号」页原来在这里做两步输入框，已改用 Phira 自带的登录界面，
-            //  见 `AccountList::ensure_login`；相关槽位与任务已一并删除。）
-            if id == "mp_addr" {
-                if let Err(err) = text.to_socket_addrs() {
-                    show_error(anyhow::Error::new(err).context(tl!("item-mp-addr-invalid")));
-                    return Ok(false);
-                } else {
-                    data.config.mp_address = text;
-                    return Ok(true);
-                }
-            } else if id == "anys_gateway" {
-                if let Err(err) = Url::parse(&text) {
-                    show_error(anyhow::Error::new(err).context(tl!("item-anys-gateway-invalid")));
-                    return Ok(false);
-                } else {
-                    data.anys_gateway = text.trim_end_matches('/').to_string();
-                    return Ok(true);
-                }
-            } else if id == "rks" {
-                let text = text.trim();
-                // 留空 = 跟随账号真实 rks
-                if text.is_empty() {
-                    data.config.rks_override = None;
-                    return Ok(true);
-                }
-                match text.parse::<f32>() {
-                    Ok(v) if (0. ..=100.).contains(&v) => {
-                        data.config.rks_override = Some(v);
-                        return Ok(true);
-                    }
-                    _ => {
-                        show_error(anyhow::anyhow!("{}", tl!("rks-invalid")));
-                        return Ok(false);
-                    }
-                }
-            } else if id == "health_max" {
-                match text.trim().parse::<f32>() {
-                    Ok(v) if (10. ..=10000.).contains(&v) => {
-                        data.config.health_max = v;
-                        return Ok(true);
-                    }
-                    _ => {
-                        show_error(anyhow::anyhow!("{}", tl!("health-max-invalid")));
-                        return Ok(false);
-                    }
-                }
-            } else if id == "combo_text" {
-                // 留空 = 默认（Autoplay 时 AUTOPLAY，否则 COMBO）
-                data.config.combo_text = text.trim().chars().take(Config::COMBO_TEXT_MAX_CHARS).collect();
-                return Ok(true);
-            } else if id == "challenge_rank" {
-                match text.trim().parse::<u32>() {
-                    Ok(v) if v <= 999 => {
-                        data.config.challenge_rank = v;
-                        return Ok(true);
-                    }
-                    _ => {
-                        show_error(anyhow::anyhow!("{}", tl!("challenge-rank-invalid")));
-                        return Ok(false);
-                    }
-                }
-            } else {
-                return_input(id, text);
             }
         }
         if let Some(task) = &mut self.cache_task {

@@ -37,11 +37,18 @@ pub(crate) use block_shader::reset_block_effects;
 /// 噪区着色器的编译错误（None = 编译成功）。给「设置 → 日志」页显示。
 pub use block_shader::{force_init as force_block_shader_init, shader_error as block_shader_error};
 
-/// 噪域贴图的运行时查找。
+/// 噪域贴图的**运行时**查找。
 ///
 /// 正常按运行目录读（exe 旁边的 `assets/blockarea/`）；`cargo test -p prpr` 的工作目录
 /// 是 crate 根，那里没有 `assets/`，所以再向上找一层兜底，让 block 的单元测试能跑。
-/// 找不到就返回 None，噪域降级成纯色矩形而不是崩溃（见 `block_shader::tex`）。
+///
+/// ⚠️ 现在**没有调用点**：噪区已按用户要求换成 Phira-Pro 的同款实现，那边用
+/// `include_bytes!` 在**编译期**把 4 张贴图嵌进二进制（见 `block_shader::tex`），
+/// 不再运行时读文件。
+///
+/// 之所以保留：它是「运行时读取 + 缺失优雅降级」那套的入口（旧实现用），
+/// 万一以后要回到那种做法（好处是换贴图不用重编），这里就是现成的。
+#[allow(dead_code)]
 pub(crate) fn read_block_asset(path: &str) -> Option<Vec<u8>> {
     std::fs::read(path).or_else(|_| std::fs::read(format!("../{path}"))).ok()
 }
