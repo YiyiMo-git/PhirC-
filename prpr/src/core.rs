@@ -34,8 +34,6 @@ mod block_audio;
 pub(crate) use block_audio::BlockAudio;
 pub use block_shader::{draw_disabled_zones, draw_zones, draw_zones_with_touches, Zone};
 pub(crate) use block_shader::reset_block_effects;
-/// 加载谱面时预热噪域的 GPU 资源（材质编译 + 显存分配），避免进图第一帧卡顿。
-pub use block_shader::prewarm as prewarm_block;
 
 /// 噪域贴图的运行时查找。
 ///

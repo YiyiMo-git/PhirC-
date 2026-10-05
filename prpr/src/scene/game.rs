@@ -261,11 +261,6 @@ pub struct GameScene {
     effects: Vec<Effect>,
 
     first_in: bool,
-    /// 噪区是否已经做过**完整预加载**（材质编译 + effect/aux/scene 三张纹理的显存分配）。
-    ///
-    /// 必须在首帧、`update_size` 把渲染目标尺寸定下来之后做，所以不能放在 `new()` 里。
-    /// 只做一次；之后噪区出现时就只剩纯绘制。
-    block_prewarmed: bool,
     exercise_range: Range<f64>,
     exercise_press: Option<(i8, u64)>,
     exercise_btns: (RectButton, RectButton),
@@ -480,7 +475,6 @@ impl GameScene {
             info_offset,
 
             first_in: false,
-            block_prewarmed: false,
             exercise_range,
             exercise_press: None,
             exercise_btns: (RectButton::new(), RectButton::new()),
@@ -2211,17 +2205,16 @@ impl Scene for GameScene {
             set_camera(&res.camera);
         }
 
-        // 噪区**完整预加载**：必须放在 `update_size` 之后 —— 噪区的 effect/aux/scene
-        // 三张纹理是按**渲染目标**尺寸分配的，而渲染目标由 `update_size` 决定。
-        // 放在 `GameScene::new` 里会用到屏幕尺寸，到第一帧还是得重新分配一次。
+        // ⚠️ 这里原来有一次「噪区完整预加载」（`prewarm_block`），已**移除**。
         //
-        // 这里首帧就把「材质编译 + 全部显存分配 + 通道渲染到贴图」一次做完，
-        // 之后噪区出现时只剩纯绘制，不会再有卡顿。
-        if !self.block_prewarmed {
-            self.block_prewarmed = true;
-            let aspect = res.aspect_ratio;
-            crate::core::prewarm_block(res, aspect);
-        }
+        // 原因：那个实现是借 `draw_layer_at` 走一遍「分配 + 编译」的路径，但
+        // `draw_layer_at` **同时会真的画一次全屏 shader pass**（`gl_use_material` +
+        // `draw_rectangle`）。虽然喂的是 0 不透明度的 dummy zone，但 shader 里
+        // **红色 spark 粒子不依赖掩码**，于是首帧会多刷一层红色粒子 —— 属于改样式。
+        // 用户明确要求「只优化性能、不改样式」，所以宁可不要这点收益。
+        //
+        // 正确的做法应该是不经绘制路径、直接分配那几张纹理（要复刻尺寸计算），
+        // 但那块涉及 MSAA / 多 pass 状态，改错会黑屏；在能实测之前不做。
 
         let msaa = res.config.sample_count > 1;
 
