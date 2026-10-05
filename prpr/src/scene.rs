@@ -267,6 +267,21 @@ pub fn has_pending_input() -> bool {
     PENDING_INPUT.lock().unwrap().is_some()
 }
 
+/// 自绘输入框的**绘制回调**，由上层（`phira`）在启动时注册一次。
+///
+/// 为什么必须挂在引擎层：引擎每帧**只渲染栈顶场景**，而输入请求可能来自任意场景
+/// （例如「谱面信息编辑」走的是 `SongScene`）。若只在某个上层页面的 `render` 里画
+/// 对话框，那些场景在栈顶时请求就表现为「**点了没反应**」。
+///
+/// 挂在 [`Main::render`] 的 `top_level` 分支里（和引擎自带 `DIALOG` 同一位置）
+/// 才能对所有场景生效。回调签名与 `phira` 的 `input_dialog::render` 一致。
+static INPUT_DIALOG_RENDERER: Mutex<Option<fn(&mut Ui, f32)>> = Mutex::new(None);
+
+/// 注册自绘输入框的绘制函数（`phira` 启动时调用一次，之后每帧由引擎调用）。
+pub fn set_input_dialog_renderer(f: fn(&mut Ui, f32)) {
+    *INPUT_DIALOG_RENDERER.lock().unwrap() = Some(f);
+}
+
 /// 自绘输入框点了「确定」：把文本交回给当初请求它的调用点。
 ///
 /// `trim` 只去掉**首尾**空白（`str::trim` 的语义），多行输入内部的换行会原样保留。
@@ -634,6 +649,14 @@ impl Main {
                     dialog.render(&mut ui, self.tm.now() as _);
                 }
             });
+            // 自绘文本输入框：刻意放在这里（引擎层、`top_level` 分支），而不是某个
+            // 上层页面里 —— 这样**任何**场景在栈顶时请求的输入都会被画出来。
+            // 具体理由见 `set_input_dialog_renderer` 的注释。
+            if has_pending_input() {
+                if let Some(render) = *INPUT_DIALOG_RENDERER.lock().unwrap() {
+                    render(&mut ui, self.tm.now() as f32);
+                }
+            }
             let remove = FULL_LOADING.with(|it| {
                 if let Some(loading) = it.borrow_mut().as_mut() {
                     if Arc::strong_count(&loading.keep_alive) > 1 {

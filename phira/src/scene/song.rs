@@ -1806,6 +1806,13 @@ impl Scene for SongScene {
 
     fn touch(&mut self, tm: &mut TimeManager, touch: &Touch) -> Result<bool> {
         let t = tm.now() as f32;
+        // 自绘输入框是**模态**的（与 MainScene::touch 同款守卫）：它存在时把触摸全部
+        // 吃掉 —— 既防止底下的编辑面板跟着响应，也防止「确定 / 取消」按钮底下重叠的
+        // 输入框按钮把同一次点击再吃一遍（输入框刚关上又立刻弹开）。
+        // 对话框自身的按钮命中读的是原始触摸（Judge::get_touches()），不受影响。
+        if prpr::scene::has_pending_input() {
+            return Ok(true);
+        }
         if self.scene_task.is_some()
             || self.save_task.is_some()
             || self.upload_task.is_some()

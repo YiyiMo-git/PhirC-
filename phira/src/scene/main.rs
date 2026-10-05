@@ -1008,7 +1008,13 @@ impl Scene for MainScene {
         // 没有待处理请求时它什么都不画。
         // ⚠️ 只有 MainScene 在栈顶时才会走到这里：独立场景（SongScene / ProfileScene /
         // GameScene 等）里发出的 request_input 不会被渲染（见模块注释的「生效范围」）。
-        crate::ui::input_dialog::render(ui, t);
+        // 自绘输入框现在由**引擎层**（`prpr::scene::Main::render` 的 `top_level` 分支）
+// 调用，这样在 `SongScene` / `GameScene` 等场景在栈顶时请求的输入也能画出来
+// （例如「谱面信息编辑」曾经完全弹不出来）。这里只负责**注册一次**回调。
+static INPUT_DIALOG_REGISTERED: std::sync::Once = std::sync::Once::new();
+INPUT_DIALOG_REGISTERED.call_once(|| {
+    prpr::scene::set_input_dialog_renderer(crate::ui::input_dialog::render);
+});
 
         Ok(())
     }
