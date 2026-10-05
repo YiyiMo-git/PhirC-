@@ -311,6 +311,10 @@ fn run_webview(hwnd: isize, cmd_rx: mpsc::Receiver<WebCmd>, ipc_cmd_tx: mpsc::Se
     // 到这里 WebView 才真正创建成功。此时才允许主场景跳过 Rust 渲染、
     // 把画面完全交给 WebView（main.rs 下一帧检测到后会自动 `set_webui_visible(true)`）。
     crate::webui::set_webui_embedded(true);
+    // 同时声明「真宿主可用」—— 这**必须和上面同一时刻**：
+    // `webui_host_real()` 是 main.rs 触发 `show()` 的条件，Windows 上它等价于
+    // 「WebView 已建好」，提前置位会让 show() 发到一个还不存在的 WebView 上。
+    crate::webui::set_webui_host_real(true);
     tracing::info!("[webui] wry WebView 创建成功，界面已交给 WebView");
 
     // 主循环：一边泵 Win32 消息、一边把通道里的 JS（来自 WryHost 的 show/hide/emit，

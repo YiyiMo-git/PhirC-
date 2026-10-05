@@ -117,11 +117,13 @@ impl AndroidHost {
             )?;
             Ok(())
         });
-        // Android 的 WebView 是在 UI 线程建的，`webuiCreate` 只是把请求投过去。
-        // 这里**不**轮询 `webuiReady()` —— 那是一次 JNI 往返，会挡在游戏线程上。
-        // WebView 里的页面在真正显示前是透明的（`setVisibility(GONE)` 起步），
-        // 所以这里直接按 Windows 侧同样的语义置「已嵌入」，让主场景把渲染交给它。
-        crate::webui::set_webui_embedded(true);
+        // Android 的 WebView 是在 UI 线程异步建的。**这里不能**置
+        // `set_webui_embedded(true)` —— 那会让主场景立刻停止 Rust 渲染，而 WebView
+        // 还没建好（甚至可能建失败），结果就是**纯黑屏**。
+        //
+        // 正确做法：等 Java 侧 `onPageFinished` 回调 `QuadNative.webuiOnReady()`
+        // （见本文件的 `on_ready`）。在那之前 WebView 是叠在 SurfaceView 之上的
+        // 原生 View，没它就显示下面的原生 UI，不会黑。
         tracing::info!("[webui-android] 已请求在 UI 线程创建 WebView");
     }
 
@@ -237,6 +239,15 @@ pub fn on_ipc(json: String) {
     if let Some(resp) = crate::webui::handle_ipc(&json) {
         AndroidHost::eval(&format!("window.__phira_recv({resp})"));
     }
+}
+
+/// Java 侧确认「WebView 已建好且首页加载完成」，由 `QuadNative.webuiOnReady()` 调用。
+///
+/// **只有到这里才能置 `WEBUI_EMBEDDED`** —— 那一步会让主场景停止 Rust 渲染、
+/// 把画面完全交给 WebView。提前置位 = 黑屏（WebView 还没内容而 Rust 又不画了）。
+pub fn on_ready() {
+    crate::webui::set_webui_embedded(true);
+    tracing::info!("[webui-android] WebView 已就绪，界面交给 WebView");
 }
 
 /// Java 侧查询 WebView 是否已就绪（WebView 实例已建好）。

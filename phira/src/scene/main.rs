@@ -244,7 +244,7 @@ impl MainScene {
         // 在这里补上，让可见性在改变的**同一帧**就生效。
         // （`webui_next_scene` 有值时不抢：那是要开谱、WebView 该让位。）
         if self.webui_next_scene.is_none()
-            && crate::webui::webui_embedded()
+            && crate::webui::webui_host_real()
             && !crate::webui::is_webui_visible()
         {
             crate::webui::set_webui_visible(true);
@@ -537,7 +537,7 @@ impl Scene for MainScene {
         // 回到根页面（开始界面）时，重新把 WebView 铺上来
         if self.pages.len() == 1
             && self.webui_next_scene.is_none()
-            && crate::webui::webui_embedded()
+            && crate::webui::webui_host_real()
             && !crate::webui::is_webui_visible()
         {
             crate::webui::set_webui_visible(true);
@@ -840,7 +840,7 @@ impl Scene for MainScene {
         // 直接走下面的 WebView 分支，原生首页一帧都不画。
         if self.pages.len() == 1
             && self.webui_next_scene.is_none()
-            && crate::webui::webui_embedded()
+            && crate::webui::webui_host_real()
             && !crate::webui::is_webui_visible()
         {
             crate::webui::set_webui_visible(true);
@@ -907,7 +907,7 @@ impl Scene for MainScene {
         //      不淡出的话它会在最后一帧「啪」地消失。
         // `to_root_p` 是「开始界面（下层页）的入场进度」：0 → 1。
         let st = s.t;
-        let to_root = s.fader.transiting() && self.pages.len() == 2 && crate::webui::webui_embedded();
+        let to_root = s.fader.transiting() && self.pages.len() == 2 && crate::webui::webui_host_real();
         let to_root_p = if to_root { s.fader.for_sub(|f| f.progress(st)) } else { 0. };
 
         // 1. page
@@ -917,7 +917,7 @@ impl Scene for MainScene {
             // 开始界面实际由原生 WebView（`ui/index.html`）承载，根页 `HomePage` 只是垫背，
             // 画出来就是用户反馈的「闪过我之前写的老界面」。
             // 只有真的嵌了 WebView 才跳过；没嵌入时根页**就是**开始界面，照常画。
-            if !(pos == 0 && crate::webui::webui_embedded()) {
+            if !(pos == 0 && crate::webui::webui_host_real()) {
                 let old = s.fader.distance;
                 s.fader.distance *= -0.6;
                 self.pages[pos].render(ui, s)?;

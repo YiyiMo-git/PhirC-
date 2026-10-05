@@ -832,6 +832,15 @@ pub extern "C" fn Java_quad_1native_QuadNative_webuiReady(_env: EnvUnowned, _cla
     }
 }
 
+/// Java 侧确认「WebView 已建好且首页加载完成」。
+///
+/// 这是**唯一**允许把界面交给 WebView 的时机 —— 提前交棒会黑屏（见该函数注释）。
+#[cfg(all(target_os = "android", feature = "webui"))]
+#[no_mangle]
+pub extern "C" fn Java_quad_1native_QuadNative_webuiOnReady(_env: EnvUnowned, _class: JClass) {
+    crate::webui_android::on_ready();
+}
+
 /// Credentials obtained from the native HYKB (好游快爆) login SDK.
 pub struct HykbCredential {
     /// SDK result code: 0 on success, otherwise an error / user cancellation.

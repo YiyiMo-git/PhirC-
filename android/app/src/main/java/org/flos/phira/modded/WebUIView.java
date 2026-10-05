@@ -56,6 +56,10 @@ public final class WebUIView {
     private boolean visible = false;
     /** 页面是否已加载过（避免重复 loadUrl）。 */
     private boolean loaded = false;
+    /** 首页是否已加载完成（`onPageFinished`）。Rust 收到 `webuiOnReady` 后才接管画面。 */
+    private boolean ready = false;
+    /** Rust 是否请求过显示（加载完成前不真的显示，避免露出空白页）。 */
+    private boolean wantVisible = false;
 
     public WebUIView(Activity activity) {
         this.activity = activity;
@@ -162,6 +166,25 @@ public final class WebUIView {
             }
 
             @Override
+            public void onPageFinished(WebView view, String url) {
+                // 【关键】首页加载完成才通知 Rust「可以把界面交给 WebView 了」。
+                //
+                // 在此之前 Rust 一直在渲染原生 UI（WebView 是叠在上面的 View，
+                // 初始 GONE）。如果提前通知，Rust 会立刻停止原生渲染，而 WebView
+                // 还没内容 —— 屏幕就是纯黑的。
+                ready = true;
+                // 之前请求过显示才真正显出来，避免加载中途露出空白页
+                if (wantVisible) {
+                    view.setVisibility(View.VISIBLE);
+                }
+                try {
+                    quad_native.QuadNative.webuiOnReady();
+                } catch (Throwable t) {
+                    CrashLog.error("webuiOnReady failed", t);
+                }
+            }
+
+            @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
                 // 站内导航交给 WebView，外部链接丢给系统浏览器。
                 String host = request.getUrl().getHost();
@@ -193,8 +216,10 @@ public final class WebUIView {
 
     public void setVisible(boolean v) {
         this.visible = v;
+        this.wantVisible = v;
         if (webView == null) return;
-        final int vis = v ? View.VISIBLE : View.GONE;
+        // 首页还没加载完就先不显示 —— 否则会闪一下空白页/黑页
+        final int vis = (v && ready) ? View.VISIBLE : View.GONE;
         activity.runOnUiThread(new Runnable() {
             @Override
             public void run() {

@@ -103,6 +103,17 @@ static WEBUI_PAGE: Mutex<String> = Mutex::new(String::new());
 /// WebView 当前是否可见（home / library / login 时可见，游玩 / 设置页时隐藏）。
 static WEBUI_VISIBLE: AtomicBool = AtomicBool::new(false);
 
+/// 「装了真宿主（不是 StubHost）」。
+///
+/// 与 [`WEBUI_EMBEDDED`] 的区别**很关键**：
+/// * `HOST_REAL` = 有平台宿主可用 → 可以调 `show()` 去建 WebView；
+/// * `EMBEDDED`  = WebView **确实已经建好并加载完** → 才能让主场景跳过 Rust 渲染。
+///
+/// 混用这两个会造成黑屏：提前把 `EMBEDDED` 置 true，但 WebView 还没建好
+/// （甚至建失败），主场景就不画了 —— 屏幕全黑。所以：
+/// 触发 `show()` 用 `HOST_REAL`，决定「跳过渲染」用 `EMBEDDED && VISIBLE`。
+static WEBUI_HOST_REAL: AtomicBool = AtomicBool::new(false);
+
 /// 是否真的嵌入了原生 WebView（wry 创建成功才置 true；StubHost 下为 false，
 /// 避免在没有 WebView 时把 Rust 首页渲染整个跳过导致黑屏）。
 static WEBUI_EMBEDDED: AtomicBool = AtomicBool::new(false);
@@ -180,28 +191,21 @@ pub fn init_host() {
         match crate::webui_android::AndroidHost::new() {
             Ok(host) => {
                 *WEBUI_HOST.lock().unwrap() = Some(Box::new(host));
-                // ⚠️ 这里**必须**立刻置位，否则移动端永远看不到 WebView。
-                //
-                // 原来的链路是个死锁：
-                //   `set_webui_visible(true)` 由 main.rs 调用，但门控要求
-                //   `webui_embedded() == true`；而 `WEBUI_EMBEDDED` 只在
-                //   `AndroidHost::ensure_created()` 里置位，那个函数又只由
-                //   `show()` 触发，`show()` 又只由 `set_webui_visible(true)` 触发。
-                //   → 三者互相等待，`WEBUI_EMBEDDED` 永远为 false，界面一直走原生 UI。
-                //
-                // Windows 没这个问题：`webui_windows` 有自己的 WebView 线程，
-                // 建好之后**自己**调 `set_webui_embedded(true)`，不依赖 `show()`。
-                //
-                // Android/iOS 的 WebView 同样是异步在 UI 线程建的、初始 `hidden`，
-                // 所以这里先声明「已嵌入」是安全的：在它真正可见之前，主场景照常
-                // 渲染原生 UI；`show()` 随后会把 WebView 建出来并显示。
-                set_webui_embedded(true);
+                // 「有真宿主」→ 允许主场景去 `show()`（那才会真正建 WebView）。
+                // ⚠️ 但**绝不能**在这里就 `set_webui_embedded(true)`！
+                // `is_webui_visible()` = EMBEDDED && VISIBLE，一旦提前置位，主场景会
+                // 整帧跳过 Rust 渲染；而 Android 的 WebView 还没建好（甚至可能建失败）
+                // → **纯黑屏**。必须是等 Java 侧确认 WebView 真的加载完（`webuiOnReady`）
+                // 才置位。在此之前 WebView 是叠在 SurfaceView 之上的原生 View，
+                // 没它就显示下面的原生 UI，不会黑。
+                WEBUI_HOST_REAL.store(true, Ordering::Relaxed);
                 tracing::info!("[webui] Android WebView 宿主已创建，等待首次显示时建 WebView");
             }
             Err(err) => {
                 tracing::error!("[webui] Android WebView 宿主创建失败，回退到原生 UI：{err:?}");
                 *WEBUI_HOST.lock().unwrap() = Some(Box::new(StubHost));
                 WEBUI_EMBEDDED.store(false, Ordering::Relaxed);
+                WEBUI_HOST_REAL.store(false, Ordering::Relaxed);
             }
         }
         return;
@@ -211,14 +215,15 @@ pub fn init_host() {
         match crate::webui_ios::IosHost::new() {
             Ok(host) => {
                 *WEBUI_HOST.lock().unwrap() = Some(Box::new(host));
-                // 同 Android：必须在这里就置位，否则 iOS 也永远走原生 UI
-                set_webui_embedded(true);
+                // 同 Android：只声明「有真宿主」，`EMBEDDED` 等 ObjC 侧确认后再置位
+                WEBUI_HOST_REAL.store(true, Ordering::Relaxed);
                 tracing::info!("[webui] iOS WKWebView 宿主已创建，等待首次显示时建 WebView");
             }
             Err(err) => {
                 tracing::error!("[webui] iOS WebView 宿主创建失败，回退到原生 UI：{err:?}");
                 *WEBUI_HOST.lock().unwrap() = Some(Box::new(StubHost));
                 WEBUI_EMBEDDED.store(false, Ordering::Relaxed);
+                WEBUI_HOST_REAL.store(false, Ordering::Relaxed);
             }
         }
         return;
@@ -265,6 +270,14 @@ pub fn webui_embedded() -> bool {
     WEBUI_EMBEDDED.load(Ordering::Relaxed)
 }
 
+/// 是否装了**真宿主**（可用于触发 `show()` 去建 WebView）。
+///
+/// 与 [`webui_embedded`] 的区别见 [`WEBUI_HOST_REAL`] 的注释 ——
+/// **触发建 WebView 用这个，决定跳过 Rust 渲染用 [`is_webui_visible`]**。
+pub fn webui_host_real() -> bool {
+    WEBUI_HOST_REAL.load(Ordering::Relaxed)
+}
+
 /// 标记「原生 WebView 是否真的创建成功」。
 ///
 /// 只由平台宿主（`webui_windows`）在 `builder.build()` **真正成功之后**调用：
@@ -272,6 +285,17 @@ pub fn webui_embedded() -> bool {
 /// - 失败 → `false`，主场景照常渲染 Rust 原生 UI，不会黑屏。
 pub fn set_webui_embedded(embedded: bool) {
     WEBUI_EMBEDDED.store(embedded, Ordering::Relaxed);
+}
+
+/// 标记「真宿主可用」（平台宿主在能接受 `show()` 的时刻调用）。
+///
+/// * Windows：在 `builder.build()` **成功之后**调用（与 `set_webui_embedded` 同时），
+///   保持原有行为不变；
+/// * Android / iOS：在 `init_host` 里就调用 —— 那两个平台的 WebView 是叠在上层的
+///   原生 View，提前触发 `show()` 只是"把 WebView 建出来"，**不会**让主场景停止
+///   渲染（`EMBEDDED` 仍为 false），所以是安全的。
+pub fn set_webui_host_real(real: bool) {
+    WEBUI_HOST_REAL.store(real, Ordering::Relaxed);
 }
 
 /// 当前界面（login / home / library / 其他）。

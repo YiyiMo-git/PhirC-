@@ -81,4 +81,12 @@ public class QuadNative {
 
     /** Rust → Java：WebView 是否已经创建并加载完成（决定要不要把画面交给它）。 */
     public native static boolean webuiReady();
+
+    /**
+     * Java → Rust：WebView 已建好**且首页加载完成**。
+     *
+     * 这是唯一允许把界面交给 WebView 的时机 —— Rust 收到后才会停止原生渲染。
+     * 提前交棒会黑屏（WebView 还没内容，而原生又不再画）。
+     */
+    public native static void webuiOnReady();
 }
