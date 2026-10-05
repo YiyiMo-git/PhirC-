@@ -2457,14 +2457,19 @@ impl AccountList {
     fn update(&mut self, _t: f32) -> Result<bool> {
         // 两步输入都齐了就把登录任务起起来（见 `AccountAddStep`）
         if self.task.is_none() {
-            let ready = ACCOUNT_ADD.with(|it| match it.borrow_mut().take() {
+            // ⚠️ 不能写成 `match it.borrow_mut().take() { ... *it.borrow_mut() = ... }` ——
+            // `borrow_mut()` 的临时守卫活到整个 match 结束，在分支里再借一次会
+            // **RefCell 二次可变借用 panic**。所以先把值取出来，守卫即刻释放。
+            let step = ACCOUNT_ADD.with(|it| it.borrow_mut().take());
+            let ready = match step {
                 Some(AccountAddStep::Ready { email, password }) => Some((email, password)),
                 Some(other) => {
-                    *it.borrow_mut() = Some(other);
+                    // 还没到第二步，放回去
+                    ACCOUNT_ADD.with(|it| *it.borrow_mut() = Some(other));
                     None
                 }
                 None => None,
-            });
+            };
             if let Some((email, password)) = ready {
                 self.start_add(email, password);
             }
@@ -2500,8 +2505,20 @@ impl AccountList {
         let m = Metrics::new(ui);
         let th = crate::newui::theme();
         let w = r.w;
+        // 与其它设置列表完全一致：文字宽度上限 + 行高走 `row_h()`。
+        // ⚠️ 之前这里自己写了 `row_h = m.u(64.)` 当行高，和 `row_h()` 不是同一个值，
+        // 卡片高度与推进量对不上 —— 表现就是「所有卡片叠在一起」。
+        set_row_text_max(w - 0.38);
         let mut h = 0.;
-        let row_h = m.u(64.);
+        macro_rules! item {
+            ($($b:tt)*) => {{
+                row_card(ui, Rect::new(0., 0., w, row_h() - 0.004));
+                $($b)*
+                ui.dy(row_h());
+                h += row_h();
+            }}
+        }
+        let rr = right_rect(w);
         // 先把要用的值都取出来（`current_email()` 内部也会读 data，读锁是共享的，
         // 但下面 `forget_account` 之类的写操作要等这里读完 —— NLL 会在最后一次使用后
         // 自动结束借用，不需要手动 drop）。
@@ -2512,124 +2529,90 @@ impl AccountList {
         let me_name = data.me.as_ref().map(|it| it.name.clone());
 
         // ---- 当前账号状态 ----
-        {
-            row_card(ui, Rect::new(0., 0., w, row_h));
-            let rt = render_title(
+        item! {
+            render_title(
                 ui,
                 if logged_in { tl!("account-current") } else { tl!("account-none") },
                 Some(
                     if logged_in {
-                        me_name.clone().unwrap_or_default().into()
+                        me_name.clone().unwrap_or_else(|| "—".to_owned()).into()
                     } else {
                         tl!("account-none-sub")
                     },
                 ),
             );
             if logged_in {
-                self.logout_btn.render_text(ui, right_rect(w), t, tl!("account-logout"), 0.5, true);
+                self.logout_btn.render_text(ui, rr, t, tl!("account-logout"), 0.5, false);
             }
-            let _ = rt;
-            ui.dy(row_h);
-            h += row_h;
         }
 
-        // ---- 添加账号 ----
-        if self.task.is_none() {
-            row_card(ui, Rect::new(0., 0., w, row_h - 0.004));
-            render_title(ui, tl!("account-add"), Some(tl!("account-add-sub")));
-            self.add_btn.render_text(ui, right_rect(w), t, tl!("account-add-btn"), 0.5, true);
-            ui.dy(row_h);
-            h += row_h;
-        } else {
-            row_card(ui, Rect::new(0., 0., w, row_h - 0.004));
-            render_title(ui, tl!("account-working"), None);
-            ui.dy(row_h);
-            h += row_h;
+        // ---- 添加 / 登录 ----
+        // 用**一个**入口：点了先要邮箱、再要密码，最后登录并保存。
+        item! {
+            if self.task.is_some() {
+                render_title(ui, tl!("account-working"), None);
+            } else {
+                render_title(ui, tl!("account-add"), Some(tl!("account-add-sub")));
+                self.add_btn.render_text(ui, rr, t, tl!("account-login-btn"), 0.5, true);
+            }
         }
 
-        // ---- 已保存的账号列表 ----
+        // ---- 已保存的账号 ----
         if accounts.is_empty() {
-            row_card(ui, Rect::new(0., 0., w, row_h - 0.004));
-            render_title(ui, tl!("account-empty"), Some(tl!("account-empty-sub")));
-            ui.dy(row_h);
-            h += row_h;
+            item! {
+                render_title(ui, tl!("account-empty"), Some(tl!("account-empty-sub")));
+            }
         } else {
             for (i, acc) in accounts.iter().enumerate() {
-                row_card(ui, Rect::new(0., 0., w, row_h - 0.004));
-                // 头像：`SafeTexture` 拿不到就用名字首字母占位（避免空白行）
-                let av = m.u(40.);
-                let av_r = Rect::new(m.u(10.), (row_h - av) / 2., av, av);
-                let initial = acc
-                    .name
-                    .chars()
-                    .next()
-                    .map(|c| c.to_uppercase().to_string())
-                    .unwrap_or_else(|| "?".to_owned());
-                // 占位圆 + 首字母
-                ui.fill_rect(
-                    av_r,
-                    crate::newui::radial(
-                        (av_r.center().x, av_r.center().y),
-                        av_r.w * 0.5,
-                        if th.dark { Color::new(1., 1., 1., 0.16) } else { Color::new(0., 0., 0., 0.10) },
-                        Color::new(0., 0., 0., 0.),
-                    ),
-                );
-                crate::newui::text(ui, &m, initial, av_r.center().x, av_r.center().y, 17., th.text_hi, (0.5, 0.5));
-
-                // 名字 + 邮箱（邮箱是切换的依据，必须显示）
-                let tx = av_r.right() + m.u(12.);
                 let is_cur = current.as_deref() == Some(acc.email.as_str());
                 let name = if acc.name.is_empty() { acc.email.clone() } else { acc.name.clone() };
-                crate::newui::text_ellipsis(
-                    ui,
-                    &m,
-                    name,
-                    tx,
-                    row_h / 2. - m.u(9.),
-                    15.,
-                    av_r.right().max(0.) + m.u(200.),
-                    th.text_hi,
-                    (0., 0.5),
-                );
-                crate::newui::text_ellipsis(
-                    ui,
-                    &m,
-                    if is_cur {
-                        format!("{} · {}", acc.email, tl!("account-current-tag"))
-                    } else {
-                        acc.email.clone()
-                    },
-                    tx,
-                    row_h / 2. + m.u(10.),
-                    12.,
-                    av_r.right().max(0.) + m.u(200.),
-                    th.text_mute,
-                    (0., 0.5),
-                );
-
-                // 右侧：切换 + 删除
-                let btn_w = m.u(78.);
-                let del_w = m.u(54.);
-                let gap = m.u(6.);
-                let rr = right_rect(w);
-                let del_r = Rect::new(rr.right() - del_w, (row_h - m.u(30.)) / 2., del_w, m.u(30.));
-                let sw_r = Rect::new(del_r.x - gap - btn_w, del_r.y, btn_w, m.u(30.));
-                self.remove_btns
-                    .get_or_insert_with_none(i)
-                    .render_text(ui, del_r, t, tl!("account-remove"), 0.45, false);
-                if !is_cur {
-                    self.switch_btns
-                        .get_or_insert_with_none(i)
-                        .render_text(ui, sw_r, t, tl!("account-switch"), 0.45, true);
+                // 副标题显示邮箱（切换的依据）+ 当前标记
+                let sub = if is_cur {
+                    format!("{} · {}", acc.email, tl!("account-current-tag"))
                 } else {
-                    // 当前账号：切换按钮位置显示「使用中」提示（不显示按钮，避免误点）
-                    crate::newui::text(ui, &m, tl!("account-in-use"), sw_r.center().x, sw_r.center().y, 13., th.text_dim, (0.5, 0.5));
+                    acc.email.clone()
+                };
+                // 一行里要放两个按钮：切换 + 删除。分左右两半排，不重叠。
+                let (sw_r, del_r) = {
+                    let half = rr.w / 2.;
+                    let gap = 0.012;
+                    (
+                        Rect::new(rr.x, rr.y, half - gap, rr.h),
+                        Rect::new(rr.x + half + gap, rr.y, half - gap, rr.h),
+                    )
+                };
+                item! {
+                    render_title(ui, name.clone(), Some(sub.into()));
+                    if is_cur {
+                        crate::newui::text_with_font(
+                            ui,
+                            &m,
+                            tl!("account-in-use"),
+                            sw_r.center().x,
+                            sw_r.center().y,
+                            14.,
+                            th.text_dim,
+                            (0.5, 0.5),
+                            &prpr::core::BOLD_FONT,
+                        );
+                    } else {
+                        self.switch_btns
+                            .get_or_insert_with_none(i)
+                            .render_text(ui, sw_r, t, tl!("account-switch"), 0.45, true);
+                    }
+                    self.remove_btns.get_or_insert_with_none(i).render_text(
+                        ui,
+                        del_r,
+                        t,
+                        if self.confirm_remove.as_deref() == Some(acc.email.as_str()) {
+                            tl!("account-remove-again")
+                        } else {
+                            tl!("account-remove")
+                        },
+                        0.45,
+                        false,
+                    );
                 }
-
-                ui.dy(row_h);
-                h += row_h;
-                let _ = i;
             }
         }
 
