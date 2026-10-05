@@ -38,7 +38,27 @@ pub(super) struct Masks {
 /// 台阶，看起来偏"粗"。桌面端有算力，这里提到 **1/4（4 像素一格）**，台阶数翻倍、
 /// 边缘更细。代价是逐像素工作量 ×4（灰阶路径只在噪区淡入的 0.5 秒内走，可接受）。
 /// 想更细可以改 2，但要先优化 `render_gray_rings` 的逐像素膨胀。
-const MASK_DIVISOR: usize = 4;
+/// 桌面端用 1/4 网格。
+const MASK_DIVISOR_DESKTOP: usize = 4;
+
+/// 遮蔽相机分辨率 = 视口 / 这个数（官方是 8，即 1/8 网格）。
+///
+/// 官方（手机）用 1/8，画面上就是 **8 像素一格**；溶解边 + 外侧辉光加起来只有约 5 个
+/// 台阶，看起来够 细 。桌面端有算力，这里提到 **1/4（4 像素一格）**，台阶数翻倍、
+/// 边缘更细。代价是逐像素工作量 ×4（灰阶路径只在噪区淡入的 0.5 秒内跑，可接受）。
+///
+/// ⚠️ 2026-10 修正：这个「桌面端」的取舍当初**没有按平台分流**，于是手机版也一直在跑
+/// 1/4 —— 相当于官方手机版的 4 倍逐像素开销（噪域逐像素 + 触摸逐像素两块都中招），
+/// 噪域一进场就掉帧（用户反馈「移动端很卡」）。
+///
+/// 现在按目标平台分流：**桌面保持 1/4（视觉完全不变）**，**移动端回到官方 1/8**
+/// （逐像素工作量降到 1/4）。移动端台阶变粗的那点差别会被 SDF 位移 + 外侧辉光糊掉，
+/// 官方手机上本来就是这么跑的，所以观感一致。
+#[cfg(any(target_os = "android", target_os = "ios"))]
+const MASK_DIVISOR: usize = 8;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+const MASK_DIVISOR: usize = MASK_DIVISOR_DESKTOP;
+
 
 impl Masks {
     pub fn render_displaced(&mut self, width: usize, height: usize, aspect: f32, zones: &[Zone], time: f32) {
@@ -113,6 +133,9 @@ impl Masks {
                 let (sr, sg) = subtract_disabled(self.layers[3][i], self.raw_disabled_green[i]);
                 let disabled = unorm((sr * sg - n).abs());
                 let (_, ready_sg) = subtract_disabled(self.layers[5][i], self.ready_green[i]);
+                // 这四个值只依赖 (x, y)，原来在 2x2 内层被重算了 4 遍（含 f32 转换与 unorm）
+                let layer4 = self.layers[4][i];
+                let ready = unorm(ready_sg);
                 for dy in 0..2 {
                     for dx in 0..2 {
                         let (xx, yy) = (x * 2 + dx, y * 2 + dy);
@@ -121,8 +144,8 @@ impl Masks {
                         self.rgba[dst + 3] = disabled;
                         // The Active material's misleading "Disabled" names
                         // actually bind the ready-only camera outputs (Start).
-                        self.aux_rgba[dst] = self.layers[4][i];
-                        self.aux_rgba[dst + 1] = unorm(ready_sg);
+                        self.aux_rgba[dst] = layer4;
+                        self.aux_rgba[dst + 1] = ready;
                         self.aux_rgba[dst + 2] = disabled;
                         if mask != 0 {
                             self.active[yy * stride + xx / 64] |= 1 << (xx % 64);

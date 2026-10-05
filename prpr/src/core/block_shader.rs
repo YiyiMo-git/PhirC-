@@ -223,6 +223,12 @@ static MATERIAL: Lazy<Option<[Material; 2]>> = Lazy::new(|| {
         .ok()
 });
 
+/// 往字节缓冲的指定偏移写入一个已打包的 u32（触摸掩码的 2x2 展开用）。
+#[inline(always)]
+fn put_u32(buf: &mut [u8], offset: usize, packed: u32) {
+    buf[offset..offset + 4].copy_from_slice(&packed.to_le_bytes());
+}
+
 /// Draw the visible zones for the current frame.
 pub fn draw_zones(res: &mut Resource, aspect: f32, zones: &[Zone]) {
     draw_layer_at(res, aspect, zones, get_time() as f32, false, &[]);
@@ -309,17 +315,31 @@ pub(crate) fn draw_layer_at(res: &mut Resource, aspect: f32, zones: &[Zone], tim
             frame.touch.update_fingers(touches, time);
             let bw = frame.masks.width / 2;
             let bh = frame.masks.height / 2;
+            // 这一段是移动端的主要热点：O(mask 像素 × 手指 × 双线性采样)，
+            // 1080p 下每帧可到百万级采样。三个优化（都与原逻辑等价）：
+            //   1. 每个源像素只采样一次（原来在内层 dx/dy 里采样了 4 次）；
+            //   2. value == 0 时直接跳过 —— 缓冲每帧开头已 fill(0)，写 0 是纯浪费带宽；
+            //   3. 4 个通道打包成一次 u32 写入（原来 4 次字节写入）。
+            // 注意 `aux_rgba` 的 R 通道在本循环里**不写**（保持 fill(0) 的结果），
+            // 只有 G 通道写 value —— 与官方 Start 相机输出的排布一致。
+            let ew = frame.masks.width;
             for y in 0..bh {
+                let row0 = y * 2 * ew;
                 for x in 0..bw {
-                    let value = frame
-                        .touch
-                        .sample(vec2((x as f32 + 0.5) / bw as f32, (y as f32 + 0.5) / bh as f32), width as f32 / height as f32);
-                    for dy in 0..2 {
-                        for dx in 0..2 {
-                            let i = ((y * 2 + dy) * frame.masks.width + x * 2 + dx) * 4 + 3;
-                            frame.masks.aux_rgba[i] = value;
-                        }
+                    let value = frame.touch.sample(
+                        vec2((x as f32 + 0.5) / bw as f32, (y as f32 + 0.5) / bh as f32),
+                        width as f32 / height as f32,
+                    );
+                    if value == 0 {
+                        continue;
                     }
+                    // 2x2 同样四字节，打包一次写四遍
+                    let packed = (value as u32) << 8;
+                    let col0 = x * 2;
+                    put_u32(&mut frame.masks.aux_rgba, (row0 + col0) * 4, packed);
+                    put_u32(&mut frame.masks.aux_rgba, (row0 + col0 + 1) * 4, packed);
+                    put_u32(&mut frame.masks.aux_rgba, (row0 + ew + col0) * 4, packed);
+                    put_u32(&mut frame.masks.aux_rgba, (row0 + ew + col0 + 1) * 4, packed);
                 }
             }
         }
