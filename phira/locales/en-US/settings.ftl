@@ -37,6 +37,13 @@ item-autoplay = Autoplay
 item-autoplay-sub = Results will not be submitted when enabled.
 chart-ui = Chart UI
 debug = Debug
+log = Log
+log-title = Startup log
+log-sub = Screenshot this page when reporting a problem
+log-refresh = Refresh
+log-clear = Clear
+log-refreshed = Refreshed
+log-cleared = Cleared
 about = Info
 
 item-lang = Language

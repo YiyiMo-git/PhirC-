@@ -54,7 +54,7 @@ where
     };
     if let Some(err) = err {
         if !warned.swap(true, Ordering::Relaxed) {
-            tracing::warn!("[webui-android] {what} 失败（同类错误后续不再打印）：{err}");
+            crate::webui::diag(&format!("JNI {what} 失败：{err}"));
         }
     }
 }
@@ -135,7 +135,7 @@ impl AndroidHost {
         // 正确做法：等 Java 侧 `onPageFinished` 回调 `QuadNative.webuiOnReady()`
         // （见本文件的 `on_ready`）。在那之前 WebView 是叠在 SurfaceView 之上的
         // 原生 View，没它就显示下面的原生 UI，不会黑。
-        tracing::info!("[webui-android] 已请求在 UI 线程创建 WebView");
+        crate::webui::diag("已请求在 UI 线程创建 WebView");
     }
 
     /// 在页面里执行 JS（等价于 Windows 侧 wry 的 `evaluate_script`）。
@@ -166,7 +166,7 @@ impl AndroidHost {
             .chain(crate::webui_assets::BINARY_ASSETS.iter().copied())
         {
             let Some((data, _mime)) = crate::webui_assets::load_asset(path) else {
-                tracing::warn!("[webui-android] 内嵌资源缺失：{path}");
+                crate::webui::diag(&format!("内嵌资源缺失：{path}"));
                 continue;
             };
             call_static(&WARNED_PUSH, "webuiPutAsset", |env, class| {
@@ -191,7 +191,7 @@ impl AndroidHost {
             )?;
             Ok(())
         });
-        tracing::info!("[webui-android] 开始页资源已推给 WebView，首页开始加载");
+        crate::webui::diag("开始页资源已推给 WebView");
     }
 }
 
@@ -262,7 +262,7 @@ pub fn on_ipc(json: String) {
 /// 把画面完全交给 WebView。提前置位 = 黑屏（WebView 还没内容而 Rust 又不画了）。
 pub fn on_ready() {
     crate::webui::set_webui_embedded(true);
-    tracing::info!("[webui-android] WebView 已就绪，界面交给 WebView");
+    crate::webui::diag("WebView 已就绪，界面交给 WebView");
 }
 
 /// Java 侧查询 WebView 是否已就绪（WebView 实例已建好）。

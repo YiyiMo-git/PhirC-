@@ -38,6 +38,13 @@ item-autoplay = 自动游玩
 item-autoplay-sub = 启用后将无法上传成绩
 chart-ui = 谱面UI
 debug = 调试
+log = 日志
+log-title = 启动日志
+log-sub = 出问题时把这一页截图发给开发者
+log-refresh = 刷新
+log-clear = 清空
+log-refreshed = 已刷新
+log-cleared = 已清空
 about = 关于
 
 item-lang = 语言

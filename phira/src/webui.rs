@@ -114,6 +114,15 @@ static WEBUI_VISIBLE: AtomicBool = AtomicBool::new(false);
 /// 触发 `show()` 用 `HOST_REAL`，决定「跳过渲染」用 `EMBEDDED && VISIBLE`。
 static WEBUI_HOST_REAL: AtomicBool = AtomicBool::new(false);
 
+/// 把 WebView 诊断写进崩溃日志文件（`<data>/phira-crash.log`）。
+///
+/// 手机上没 adb，`tracing` 的输出看不到；而这个文件在**设置 → 日志**页里能直接看。
+/// 移动端 WebView 出问题时，这几行就是唯一的线索。
+pub fn diag(msg: &str) {
+    tracing::info!("[webui] {msg}");
+    crate::crash_log_stage(&format!("[webui] {msg}"));
+}
+
 /// 是否真的嵌入了原生 WebView（wry 创建成功才置 true；StubHost 下为 false，
 /// 避免在没有 WebView 时把 Rust 首页渲染整个跳过导致黑屏）。
 static WEBUI_EMBEDDED: AtomicBool = AtomicBool::new(false);
@@ -176,10 +185,10 @@ pub fn init_host() {
                 // 而整帧跳过 Rust 渲染 —— 结果就是纯黑屏。
                 // 正确做法：由 webui_windows 在 build() 真正成功后调用
                 // `set_webui_embedded(true)`；失败则保持 false，自动回退到原生 UI。
-                tracing::info!("[webui] wry 宿主线程已启动，等待 WebView 创建结果");
+                diag("wry 宿主线程已启动，等待 WebView 创建结果");
             }
             Err(err) => {
-                tracing::error!("[webui] wry 宿主创建失败，回退到原生 UI：{err:?}");
+                diag(&format!("wry 宿主创建失败，回退到原生 UI：{err:?}"));
                 *WEBUI_HOST.lock().unwrap() = Some(Box::new(StubHost));
                 WEBUI_EMBEDDED.store(false, Ordering::Relaxed);
             }
@@ -199,10 +208,10 @@ pub fn init_host() {
                 // 才置位。在此之前 WebView 是叠在 SurfaceView 之上的原生 View，
                 // 没它就显示下面的原生 UI，不会黑。
                 WEBUI_HOST_REAL.store(true, Ordering::Relaxed);
-                tracing::info!("[webui] Android WebView 宿主已创建，等待首次显示时建 WebView");
+                diag("Android WebView 宿主已创建，等待首次显示时建 WebView");
             }
             Err(err) => {
-                tracing::error!("[webui] Android WebView 宿主创建失败，回退到原生 UI：{err:?}");
+                diag(&format!("Android WebView 宿主创建失败，回退到原生 UI：{err:?}"));
                 *WEBUI_HOST.lock().unwrap() = Some(Box::new(StubHost));
                 WEBUI_EMBEDDED.store(false, Ordering::Relaxed);
                 WEBUI_HOST_REAL.store(false, Ordering::Relaxed);
@@ -217,10 +226,10 @@ pub fn init_host() {
                 *WEBUI_HOST.lock().unwrap() = Some(Box::new(host));
                 // 同 Android：只声明「有真宿主」，`EMBEDDED` 等 ObjC 侧确认后再置位
                 WEBUI_HOST_REAL.store(true, Ordering::Relaxed);
-                tracing::info!("[webui] iOS WKWebView 宿主已创建，等待首次显示时建 WebView");
+                diag("iOS WKWebView 宿主已创建，等待首次显示时建 WebView");
             }
             Err(err) => {
-                tracing::error!("[webui] iOS WebView 宿主创建失败，回退到原生 UI：{err:?}");
+                diag(&format!("iOS WebView 宿主创建失败，回退到原生 UI：{err:?}"));
                 *WEBUI_HOST.lock().unwrap() = Some(Box::new(StubHost));
                 WEBUI_EMBEDDED.store(false, Ordering::Relaxed);
                 WEBUI_HOST_REAL.store(false, Ordering::Relaxed);
@@ -248,7 +257,13 @@ pub fn host_available() -> bool {
 
 /// 设置 WebView 可见性（同时驱动宿主 show/hide）。
 pub fn set_webui_visible(visible: bool) {
-    WEBUI_VISIBLE.store(visible, Ordering::Relaxed);
+    // 只在**变化**时记一行（这个函数每帧都可能被调用，不能刷屏）。
+    // 这一行是排查「移动端看不到 WebView」的关键：能看到 `false -> true`
+    // 才说明主场景的触发条件真的成立了。
+    let prev = WEBUI_VISIBLE.swap(visible, Ordering::Relaxed);
+    if prev != visible {
+        diag(&format!("WebView 可见性：{prev} -> {visible}"));
+    }
     let host = WEBUI_HOST.lock().unwrap();
     if let Some(h) = host.as_ref() {
         if visible {

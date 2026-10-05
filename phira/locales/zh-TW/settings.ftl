@@ -37,6 +37,14 @@ item-text-scale = 打歌字號
 item-text-scale-sub = 縮放打歌介面的所有文字（分數／連擊／準度／曲名）。1.00 = 上游 Phira 原大小，1.78 = Phi-Recorder 的精確大小
 chart-ui = 譜面UI
 debug = 除錯
+log = 日誌
+log-title = 啟動日誌
+log-sub = 出問題時把這一頁截圖給開發者
+log-refresh = 重新整理
+log-clear = 清空
+log-refreshed = 已重新整理
+log-cleared = 已清空
+
 about = 關於
 item-lang = 語言
 item-fullscreen = 全螢幕模式

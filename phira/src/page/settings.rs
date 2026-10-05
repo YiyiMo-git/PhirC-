@@ -170,6 +170,8 @@ enum SettingListType {
     Chart,
     ChartUi,
     Debug,
+    /// **日志**：把 `<data>/phira-crash.log` 显示在屏幕上，手机端不用 adb 也能看。
+    Log,
     About,
 }
 
@@ -180,6 +182,7 @@ pub struct SettingsPage {
     list_chart: ChartList,
     list_chart_ui: ChartUiList,
     list_debug: DebugList,
+    list_log: LogList,
 
     tabs: Tabs<SettingListType>,
 
@@ -200,6 +203,7 @@ impl SettingsPage {
             list_chart: ChartList::new(),
             list_chart_ui: ChartUiList::new(),
             list_debug: DebugList::new(),
+            list_log: LogList::new(),
 
             tabs: Tabs::new([
                 (SettingListType::General, || tl!("general")),
@@ -208,8 +212,9 @@ impl SettingsPage {
                 (SettingListType::Chart, || tl!("chart")),
                 (SettingListType::ChartUi, || tl!("chart-ui")),
                 (SettingListType::Debug, || tl!("debug")),
+                (SettingListType::Log, || tl!("log")),
                 (SettingListType::About, || tl!("about")),
-            ] as [(SettingListType, TitleFn); 7]),
+            ] as [(SettingListType, TitleFn); 8]),
 
             scroll: Scroll::new(),
             save_time: f32::INFINITY,
@@ -241,6 +246,7 @@ impl Page for SettingsPage {
             SettingListType::Chart => self.list_chart.top_touch(touch, t),
             SettingListType::ChartUi => self.list_chart_ui.top_touch(touch, t),
             SettingListType::Debug => self.list_debug.top_touch(touch, t),
+            SettingListType::Log => self.list_log.top_touch(touch, t),
             SettingListType::About => false,
         } {
             return Ok(true);
@@ -262,6 +268,7 @@ impl Page for SettingsPage {
             SettingListType::Chart => self.list_chart.touch(touch, t)?,
             SettingListType::ChartUi => self.list_chart_ui.touch(touch, t)?,
             SettingListType::Debug => self.list_debug.touch(touch, t)?,
+            SettingListType::Log => self.list_log.touch(touch, t)?,
             SettingListType::About => None,
         } {
             if p {
@@ -282,6 +289,7 @@ impl Page for SettingsPage {
             SettingListType::Chart => self.list_chart.update(t)?,
             SettingListType::ChartUi => self.list_chart_ui.update(t)?,
             SettingListType::Debug => self.list_debug.update(t)?,
+            SettingListType::Log => self.list_log.update(t)?,
             SettingListType::About => false,
         };
         self.scroll.update(t);
@@ -360,6 +368,7 @@ impl Page for SettingsPage {
                         SettingListType::Chart => self.list_chart.render(ui, r, t),
                         SettingListType::ChartUi => self.list_chart_ui.render(ui, r, t),
                         SettingListType::Debug => self.list_debug.render(ui, r, t),
+            SettingListType::Log => self.list_log.render(ui, r, t),
                         SettingListType::About => render_about(ui, r, &self.icon),
                     });
                 });
@@ -2613,6 +2622,143 @@ impl GetOrInsertBtn for Vec<DRectButton> {
             self.push(DRectButton::new());
         }
         &mut self[i]
+    }
+}
+
+// ============================ 「日志」页 ============================
+//
+// 手机上没有 adb，出问题只能靠截图。这里把 `<data>/phira-crash.log` 直接显示出来。
+//
+// 这个文件和 Java 侧 `CrashLog`、Rust 的 panic hook、以及 `webui::diag` 共用
+// （都在 `dir::root()` 下），所以里面既有 Java 的启动阶段/异常，也有 Rust 的
+// 启动阶段与 `[webui]` 诊断。
+
+struct LogList {
+    /// 「刷新」按钮（重新读文件）
+    refresh_btn: DRectButton,
+    /// 「清空」按钮
+    clear_btn: DRectButton,
+    /// 当前显示的内容（按行切好）
+    lines: Vec<String>,
+}
+
+impl LogList {
+    fn new() -> Self {
+        let mut it = Self {
+            refresh_btn: DRectButton::new(),
+            clear_btn: DRectButton::new(),
+            lines: Vec::new(),
+        };
+        it.reload();
+        it
+    }
+
+    /// 崩溃日志文件路径（`dir::root()` 就是 Java `getFilesDir()/data`）。
+    fn log_path() -> Option<std::path::PathBuf> {
+        let root = dir::root().ok()?;
+        Some(std::path::Path::new(&root).join("phira-crash.log"))
+    }
+
+    /// 重新读取日志（只保留最后 200 行，避免超大文件卡住渲染）。
+    fn reload(&mut self) {
+        self.lines.clear();
+        let Some(path) = Self::log_path() else {
+            self.lines.push("（无法确定数据目录）".to_owned());
+            return;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let all: Vec<&str> = text.lines().collect();
+                let start = all.len().saturating_sub(200);
+                self.lines.extend(all[start..].iter().map(|s| (*s).to_owned()));
+                if self.lines.is_empty() {
+                    self.lines.push("（日志为空）".to_owned());
+                }
+            }
+            Err(err) => {
+                self.lines.push(format!("（读取失败：{err}）"));
+                self.lines.push(format!("路径：{}", path.display()));
+            }
+        }
+    }
+
+    fn top_touch(&mut self, _touch: &Touch, _t: f32) -> bool {
+        false
+    }
+
+    fn touch(&mut self, touch: &Touch, t: f32) -> Result<Option<bool>> {
+        if self.refresh_btn.touch(touch, t) {
+            self.reload();
+            show_message(tl!("log-refreshed")).ok();
+            return Ok(Some(true));
+        }
+        if self.clear_btn.touch(touch, t) {
+            if let Some(path) = Self::log_path() {
+                let _ = std::fs::write(&path, b"");
+            }
+            self.reload();
+            show_message(tl!("log-cleared")).ok();
+            return Ok(Some(true));
+        }
+        Ok(None)
+    }
+
+    fn update(&mut self, _t: f32) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// 一行日志一行卡片地铺开（复用页面自身的滚动，不用再做嵌套滚动）。
+    fn render(&mut self, ui: &mut Ui, r: Rect, t: f32) -> (f32, f32) {
+        let w = r.w;
+        set_row_text_max(w - 0.05);
+        let mut h = 0.;
+        macro_rules! item {
+            ($($b:tt)*) => {{
+                row_card(ui, Rect::new(0., 0., w, row_h() - 0.004));
+                $($b)*
+                ui.dy(row_h());
+                h += row_h();
+            }}
+        }
+        let rr = right_rect(w);
+        let m = Metrics::new(ui);
+        let th = crate::newui::theme();
+
+        item! {
+            render_title(ui, tl!("log-title"), Some(tl!("log-sub")));
+            let half = rr.w / 2.;
+            let gap = 0.012;
+            self.refresh_btn.render_text(
+                ui, Rect::new(rr.x, rr.y, half - gap, rr.h), t, tl!("log-refresh"), 0.45, true);
+            self.clear_btn.render_text(
+                ui, Rect::new(rr.x + half + gap, rr.y, half - gap, rr.h), t, tl!("log-clear"), 0.45, false);
+        }
+
+        // 每行日志占一个窄行（比设置项矮，才能在一屏里看更多）
+        let line_h = row_h() * 0.62;
+        for line in &self.lines {
+            row_card(ui, Rect::new(0., 0., w, line_h - 0.004));
+            // `[webui]` / 失败 / 异常行高亮，方便一眼找到
+            let color = if line.contains("[webui") || line.contains("失败") || line.contains("Exception") {
+                Color::new(1., 0.55, 0.45, 0.95)
+            } else {
+                th.text_mute
+            };
+            crate::newui::text_ellipsis(
+                ui,
+                &m,
+                line.clone(),
+                0.012,
+                (line_h - 0.004) / 2.,
+                11.,
+                w - 0.03,
+                color,
+                (0., 0.5),
+            );
+            ui.dy(line_h);
+            h += line_h;
+        }
+        (w, h)
     }
 }
 
