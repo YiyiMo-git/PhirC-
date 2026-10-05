@@ -59,7 +59,7 @@ pub(super) struct TouchMask {
 
 impl Default for TouchMask {
     fn default() -> Self {
-        let source = image::load_from_memory(include_bytes!("../../../assets/blockarea/TouchHover.png"))
+        let source = image::load_from_memory(include_bytes!("../../../../assets/blockarea/TouchHover.png"))
             .expect("official touch hover source")
             .to_rgba8();
         Self {

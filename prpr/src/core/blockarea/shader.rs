@@ -9,15 +9,18 @@
 //! is copied from the existing chart pass (resolving its MSAA target first).
 //! Material arithmetic and texture settings come from the exported GLSL/.mat.
 
-use super::{BlockArea, BlockPhase, Matrix, Resource, Vector};
+use crate::core::{BlockArea, BlockPhase, Matrix, Resource, Vector};
 use macroquad::prelude::*;
 use miniquad::{TextureWrap, UniformType};
 use once_cell::sync::Lazy;
 use std::cell::RefCell;
 
-#[path = "block_mask.rs"]
+// ⚠️ 必须保留 `#[path]`：`shader.rs` 不是 `mod.rs`，按 Rust 2018 的规则，
+// 它里面的 `mod mask;` 会被找去 `blockarea/shader/mask.rs`，而不是同级的
+// `blockarea/mask.rs`。加上 `#[path]` 才能把两个兄弟文件当成子模块。
+#[path = "mask.rs"]
 mod mask;
-#[path = "block_touch.rs"]
+#[path = "touch.rs"]
 mod touch;
 
 /// A resolved rectangle (axis-aligned in its own space).
@@ -76,11 +79,11 @@ fn tex(bytes: &[u8], wrap: TextureWrap) -> Texture2D {
     texture
 }
 
-static DISPLACE_TEX: Lazy<Texture2D> = Lazy::new(|| tex(include_bytes!("../../../assets/blockarea/BlockNoise1.png"), TextureWrap::Mirror));
-static SPARK_TEX: Lazy<Texture2D> = Lazy::new(|| tex(include_bytes!("../../../assets/blockarea/PointNoise.png"), TextureWrap::Repeat));
+static DISPLACE_TEX: Lazy<Texture2D> = Lazy::new(|| tex(include_bytes!("../../../../assets/blockarea/BlockNoise1.png"), TextureWrap::Mirror));
+static SPARK_TEX: Lazy<Texture2D> = Lazy::new(|| tex(include_bytes!("../../../../assets/blockarea/PointNoise.png"), TextureWrap::Repeat));
 // This PNG is regenerated from original RGB565 with full 5/6-bit replication.
 // The initial exporter only shifted bits, which darkened the hover dissolve.
-static NOISE_TEX: Lazy<Texture2D> = Lazy::new(|| tex(include_bytes!("../../../assets/blockarea/FD_Noise_00000.png"), TextureWrap::Mirror));
+static NOISE_TEX: Lazy<Texture2D> = Lazy::new(|| tex(include_bytes!("../../../../assets/blockarea/FD_Noise_00000.png"), TextureWrap::Mirror));
 
 // Typed f32 values are essential: this macroquad fork rejects f64 for Float1.
 // Keep these uniforms, rather than folding their values into GLSL, so that the
@@ -479,5 +482,5 @@ fn copy_scene(res: &Resource, pass: Option<miniquad::RenderPass>, viewport: (i32
     }
 }
 
-const VERTEX: &str = include_str!("block_shader_full.vert");
-const FRAGMENT: &str = include_str!("block_shader_full.frag");
+const VERTEX: &str = include_str!("shader_full.vert");
+const FRAGMENT: &str = include_str!("shader_full.frag");

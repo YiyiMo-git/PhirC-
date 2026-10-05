@@ -29,13 +29,12 @@ pub use block::{
     block_touch_blocked, touch_inset_world, BlockArea, BlockMoveEvent, BlockPhase, BlockRotateEvent, BlockScaleEvent, BlockTransform,
 };
 
-mod block_shader;
-mod block_audio;
-pub(crate) use block_audio::BlockAudio;
-pub use block_shader::{draw_disabled_zones, draw_zones, draw_zones_with_touches, Zone};
-pub(crate) use block_shader::reset_block_effects;
-/// 噪区着色器的编译错误（None = 编译成功）。给「设置 → 日志」页显示。
-pub use block_shader::{force_init as force_block_shader_init, shader_error as block_shader_error};
+mod blockarea;
+pub(crate) use blockarea::BlockAudio;
+pub(crate) use blockarea::reset_block_effects;
+pub use blockarea::{draw_disabled_zones, draw_zones, draw_zones_with_touches, Zone};
+/// 噪区着色器的编译错误（`None` = 编译成功）。给「设置 → 日志」页显示。
+pub use blockarea::{block_shader_error, force_block_shader_init};
 
 /// 噪域贴图的**运行时**查找。
 ///

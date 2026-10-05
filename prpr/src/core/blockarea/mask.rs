@@ -4,7 +4,7 @@ use super::Zone;
 use once_cell::sync::Lazy;
 
 static DISPLACE: Lazy<image::RgbImage> = Lazy::new(|| {
-    let source = image::load_from_memory(include_bytes!("../../../assets/blockarea/BlockNoise1.png"))
+    let source = image::load_from_memory(include_bytes!("../../../../assets/blockarea/BlockNoise1.png"))
         .unwrap()
         .to_rgb8();
     image::imageops::flip_vertical(&source)
