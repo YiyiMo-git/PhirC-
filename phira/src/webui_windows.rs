@@ -242,41 +242,12 @@ pub(crate) const START_PAGE_INIT_SCRIPT: &str = r#"
    * 本来就占着 `top:30px; right:30px` —— 注入的元素**把用户的 logo 挡住了**。
    *
    * 现在账号管理完整落在「设置 → 账号」页（原生 UI，添加 / 切换 / 删除），
-   * 所以这里不再注入任何元素，避免和 HTML 自己的布局打架。
-   * 下面的函数留着只为了让老调用点不炸；永远不会再往 DOM 里加东西。
+   * 所以这里**彻底删掉**了注入代码，不再往 DOM 里加任何东西。
+   *
+   * ⚠️ 教训：删这段时曾留下半截函数体（孤立 `}` + 已删掉的 `ACCOUNT_STYLE`），
+   * 那是 **JS 语法错误** —— 注入脚本一报错，整个 bridge（含 5 个按钮的监听）
+   * 都不再执行。改这个字符串后**务必确认 JS 括号配平**（Rust 编译不检查 JS！）。
    */
-  function installAccount() {
-    return;
-  }
-
-    var st = document.createElement('style');
-    st.id = 'phira-account-style';
-    if (!document.getElementById('phira-account-style')) document.head.appendChild(st);
-    st.textContent = ACCOUNT_STYLE;
-
-    var el = document.createElement('div');
-    el.id = 'phira-account';
-    el.title = '账号：点击登录 / 退出';
-    document.body.appendChild(el);
-    el.addEventListener('click', onAccountClick);
-    renderAccount();
-  }
-
-  function renderAccount() {
-    // （已停用，见 `installAccount` 注释）
-    return;
-  }
-
-  function refreshMe() {
-    return invoke('get_me').then(function (me) {
-      return me;
-    }).catch(function () { return null; });
-  }
-
-  function onAccountClick() {
-    // （已停用）账号操作改在「设置 → 账号」页
-    return;
-  }
 
   start();
 })();

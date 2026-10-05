@@ -2502,12 +2502,14 @@ impl AccountList {
         let w = r.w;
         let mut h = 0.;
         let row_h = m.u(64.);
+        // 先把要用的值都取出来（`current_email()` 内部也会读 data，读锁是共享的，
+        // 但下面 `forget_account` 之类的写操作要等这里读完 —— NLL 会在最后一次使用后
+        // 自动结束借用，不需要手动 drop）。
         let data = get_data();
         let accounts = data.accounts.clone();
         let current = crate::page::user::current_email();
         let logged_in = data.me.is_some();
         let me_name = data.me.as_ref().map(|it| it.name.clone());
-        drop(data);
 
         // ---- 当前账号状态 ----
         {

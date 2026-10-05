@@ -7,9 +7,14 @@
 //! Windows 走 `webui://` 自定义协议、Android 走 Java 内存资源表，两边都从这里取字节。
 
 /// 文本资源（`include_str!`，天然是 UTF-8）。
+///
+/// 只有 **Android** 宿主用得到这张清单（它要把每份资源逐个推给 Java 的内存资源表）；
+/// Windows 走 `webui://` 自定义协议、iOS 走内联单文件 HTML，都不需要遍历。
+#[cfg(target_os = "android")]
 pub const TEXT_ASSETS: &[&str] = &["index.html", "style.css", "app.js", "bridge.js"];
 
-/// 二进制资源（`include_bytes!`）。
+/// 二进制资源（`include_bytes!`）。用途同 [`TEXT_ASSETS`]，仅 Android 需要。
+#[cfg(target_os = "android")]
 pub const BINARY_ASSETS: &[&str] = &["assets/TriGridBase.png", "assets/phirc.png", "assets/3.png", "assets/cmdysj.ttf"];
 
 /// 按相对路径取一份内嵌资源，连同它的 MIME 类型。
@@ -47,7 +52,10 @@ pub fn load_asset(path: &str) -> Option<(Vec<u8>, &'static str)> {
 /// 内联成 data URI 后，页面是同源文档，既没有跨源问题也不需要任何自定义协议。
 /// 代价是字符串变大（字体 13MB → base64 ~18MB），只在加载那一刻占内存。
 ///
-/// 逻辑刻意放在 Rust 侧（而不是 ObjC 里），是为了**能在 Windows 上编译验证**。
+/// 内联逻辑刻意放在 Rust 侧（而不是 ObjC 里），是为了**能在 Windows 上编译验证**。
+///
+/// 只有 iOS 宿主用得到（Windows 走自定义协议、Android 走 Java 内存表），所以按平台门控。
+#[cfg(target_os = "ios")]
 pub fn build_inlined_index_html() -> Option<String> {
     let (html_bytes, _) = load_asset("index.html")?;
     let mut out = String::from_utf8(html_bytes).ok()?;
@@ -67,7 +75,8 @@ pub fn build_inlined_index_html() -> Option<String> {
     Some(out)
 }
 
-/// 标准 base64（无换行）。不引额外依赖：就这几行。
+/// 标准 base64（无换行）。不引额外依赖：就这几行。仅 iOS 内联用，故按平台门控。
+#[cfg(target_os = "ios")]
 fn base64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut s = String::with_capacity((data.len() + 2) / 3 * 4);
