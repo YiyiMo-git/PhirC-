@@ -288,7 +288,20 @@ pub(crate) fn draw_layer_at(res: &mut Resource, aspect: f32, zones: &[Zone], tim
         let texture = pass.texture(gl.quad_context);
         (texture.width as f32, texture.height as f32)
     } else {
-        gl.quad_context.screen_size()
+        // ⚠️ 这里**不能**用 `gl.quad_context.screen_size()`。
+        //
+        // 那是 miniquad 的 surface 尺寸（物理/窗口像素），而 macroquad 的
+        // `screen_width()/screen_height()` 是**逻辑**尺寸 —— 两者在 Android 上经常不同
+        // （DPI 缩放、刘海/全屏适配都会让它们不等）。
+        //
+        // 而本函数紧接着用 width/height 去算掩码尺寸（`bw = width / 8`）以及
+        // `_View` / `_ScreenParams` 等 uniform，渲染其余部分用的却是 macroquad 的逻辑
+        // 坐标系。用错一个就会让噪区格子相对屏幕的比例改变 ——
+        // 表现就是「**APK 的噪区和 exe 不一样**」。
+        //
+        // Phira-Pro 原版这里用的是 `screen_size()`；本分支统一改用 macroquad 的逻辑
+        // 尺寸，才能和 exe 端以及渲染管线其余部分对齐。
+        (screen_width(), screen_height())
     };
     let viewport = gl.quad_gl.get_viewport().unwrap_or((0, 0, width as i32, height as i32));
     gl.flush();
