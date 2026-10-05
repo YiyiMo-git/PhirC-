@@ -853,6 +853,16 @@ impl<'a> Ui<'a> {
         self.touches = Some(touches);
     }
 
+    /// 本帧的触摸列表（由 `Main::render` 每帧通过 [`Self::set_touches`] 写入）。
+    ///
+    /// 给「画在引擎层、但要自己判定命中」的界面用 —— 例如 `phira` 的自绘输入框。
+    /// ⚠️ 别再用 `Judge::get_touches()`：那只在**游戏内**有数据，主菜单/设置/曲库里
+    /// 恒为空，会导致输入框的确定/取消按钮**永远点不到**（弹窗卡死 → 模态守卫把
+    /// 全界面的点击都吃掉）。帧内没有触摸时返回空切片。
+    pub fn touches(&self) -> &[Touch] {
+        self.touches.as_deref().unwrap_or(&[])
+    }
+
     pub fn builder<T: IntoShading>(&self, shading: T) -> VertexBuilder<T::Target> {
         VertexBuilder::new(self.transform, shading.into_shading(), self.alpha)
     }

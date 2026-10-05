@@ -40,7 +40,6 @@
 use crate::newui::{self, Metrics};
 use macroquad::prelude::*;
 use prpr::{
-    judge::Judge,
     scene::{cancel_pending_input, finish_pending_input, pending_input},
     ui::Ui,
 };
@@ -224,7 +223,10 @@ pub fn render(ui: &mut Ui, t: f32) {
     let mp = newui::unproject(ui, (mx, my));
     let hovered = |r: Rect| r.contains(vec2(mp.0, mp.1));
     // 点击 / 触摸命中：和 `GameScene` 的暂停面板同一套写法（读本帧的原始触摸）。
-    let touches = Judge::get_touches();
+    // ⚠️ 必须用**引擎本帧的触摸**，不能用 `Judge::get_touches()`：
+    // Judge 只在游戏内有数据，主菜单 / 设置 / 曲库里恒为空 → 确定/取消永远点不到
+    // → 弹窗卡死 → 模态守卫吃掉全界面点击（用户实测「什么都点不动」）。
+    let touches = ui.touches().to_vec();  // 拷一份，避免和下面的可变绘制借用冲突
     let clicked = |r: Rect| touches.iter().any(|it| it.phase == TouchPhase::Started && r.contains(it.position));
 
     let hp_cancel = if hovered(cancel_r) { 1. } else { 0. };
