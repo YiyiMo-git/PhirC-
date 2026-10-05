@@ -1254,15 +1254,8 @@ pub fn acrylic(ui: &mut Ui, r: Rect, radius: f32, th: &Theme) {
     frosted_halo(ui, r, radius, th);
     let path = r.rounded(radius);
     // ② 半透明底板：背景从下面透上来。
-    // 开了「真·背景模糊」时，铺底的模糊背景已经很「糊」，这里把实色压低一档
-    // （alpha ×0.62），让模糊背景更多地透出来 —— 这才是磨砂玻璃该有的通透感。
-    let bg = if crate::backdrop::texture().is_some() {
-        let mut c = th.bg_elev;
-        c.a *= 0.62;
-        c
-    } else {
-        th.bg_elev
-    };
+    // 背景模糊管线已删除，铺底的永远是锐利背景，这里固定用标准底板色。
+    let bg = th.bg_elev;
     ui.fill_path(&path, bg);
     // ③ 雾面（上半层往下渐隐的白膜）：这是「磨砂」最直观的一层 ——
     // 对应设计稿 `.glass-btn::before` 那层斜向高光，原来是缺的。

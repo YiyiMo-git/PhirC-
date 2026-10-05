@@ -13,7 +13,7 @@ use anyhow::{anyhow, Context, Result};
 use macroquad::prelude::*;
 use prpr::{
     core::ResPackInfo,
-    ext::{unzip_into, RectExt, SafeTexture, ScaleType},
+    ext::{unzip_into, RectExt, SafeTexture},
     info::ChartInfo,
     parse::ParseWarnings,
     scene::{return_file, show_error, show_message, take_file, NextScene, Scene},
@@ -71,9 +71,6 @@ pub struct MainScene {
     bg_beijing: SafeTexture,
     btn_back: RectButton,
 
-    /// 真·背景模糊管线（把背景渲到 RT → 高斯模糊 → 整屏铺底）。
-    /// 关闭或不可用时自动降级为锐利背景 + 磨砂配方。
-    backdrop: crate::backdrop::Backdrop,
 
     pages: Vec<Box<dyn Page>>,
 
@@ -175,7 +172,6 @@ impl MainScene {
             bg_beijing: TEX_BEIJING.with(|it| it.borrow().clone().unwrap()),
             btn_back: RectButton::new(),
 
-            backdrop: Default::default(),
 
             pages: Vec::new(),
 
@@ -874,27 +870,15 @@ impl Scene for MainScene {
         // 开始界面背景 = 设计稿的 `.grid-bg` + `.ambient` + `.vignette`
         // （beijing 底图仍压在最下面，压暗后当纹理用）。
         //
-        // 若开启了「背景模糊」且 RT / 着色器可用：把背景渲进半分辨率 RT → 高斯模糊
-        // → 把模糊结果整屏铺底，玻璃面板底下透出来的就是真·模糊背景。
-        // 任何一步不可用都静默降级：仍走锐利背景（绝不黑屏 / 不 panic）。
-        if get_data().config.ui_backdrop_blur && self.backdrop.ensure(ui.viewport.2 as u32, ui.viewport.3 as u32) {
-            let ok = self.backdrop.capture_and_blur(ui, |ui: &mut Ui| {
-                newui::draw_background(ui, &m, &th, t, Some(base.clone()));
-            });
-            if ok {
-                if let Some(tex) = crate::backdrop::texture() {
-                    let sr = ui.screen_rect();
-                    ui.fill_rect(sr, (tex, sr, ScaleType::Fit));
-                } else {
-                    newui::draw_background(ui, &m, &th, t, Some(base));
-                }
-            } else {
-                newui::draw_background(ui, &m, &th, t, Some(base));
-            }
-        } else {
-            crate::backdrop::set_texture(None);
-            newui::draw_background(ui, &m, &th, t, Some(base));
-        }
+        // ⚠️「真·背景模糊」管线**已按用户要求删除**。
+        //
+        // 它原来每帧要：把背景渲进一张半分辨率 RenderTarget → 水平高斯 → 垂直高斯
+        // → 再把结果整屏铺底，也就是**两张全屏 RT + 两遍全屏模糊 + 一次整屏绘制**。
+        // 现在恒定使用锐利背景（`draw_background`）。
+        //
+        // `Config::ui_backdrop_blur` 字段仍保留，只为兼容旧存档的反序列化，
+        // 不再有任何行为（设置里对应的开关行也已删除）。
+        newui::draw_background(ui, &m, &th, t, Some(base));
 
         let s = &mut self.state;
         s.update(tm);

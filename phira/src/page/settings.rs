@@ -684,8 +684,6 @@ struct GeneralList {
     /// 深浅主题开关。原来只有外壳底部状态栏最右那个太阳/月亮按钮能做这件事，
     /// 状态栏被移除后挪到这里。
     theme_btn: DRectButton,
-    /// 玻璃面板「真·背景模糊」开关（把背景渲到 RenderTarget → 高斯模糊 → 面板采样）。
-    backdrop_btn: DRectButton,
 
     #[cfg(all(any(target_os = "windows", target_os = "linux"), not(target_env = "ohos")))]
     fullscreen_btn: DRectButton,
@@ -756,7 +754,6 @@ impl GeneralList {
                 ),
 
             theme_btn: DRectButton::new(),
-            backdrop_btn: DRectButton::new(),
 
             #[cfg(all(any(target_os = "windows", target_os = "linux"), not(target_env = "ohos")))]
             fullscreen_btn: DRectButton::new(),
@@ -845,12 +842,6 @@ impl GeneralList {
             return Ok(Some(true));
         }
 
-        if self.backdrop_btn.touch(touch, t) {
-            // 玻璃面板「真·背景模糊」开关。`Config::ui_backdrop_blur` 会持久化，
-            // 主场景每帧回读它来决定是否启用 RT 模糊管线（不可用时自动回退磨砂配方）。
-            config.ui_backdrop_blur ^= true;
-            return Ok(Some(true));
-        }
 
         #[cfg(all(any(target_os = "windows", target_os = "linux"), not(target_env = "ohos")))]
         if self.fullscreen_btn.touch(touch, t) {
@@ -1055,11 +1046,6 @@ impl GeneralList {
         item! {
             render_title(ui, tl!("item-theme"), Some(tl!("item-theme-sub")));
             render_switch(ui, rr, t, &mut self.theme_btn, crate::newui::is_dark());
-        }
-
-        item! {
-            render_title(ui, tl!("item-backdrop-blur"), Some(tl!("item-backdrop-blur-sub")));
-            render_switch(ui, rr, t, &mut self.backdrop_btn, config.ui_backdrop_blur);
         }
 
         #[cfg(all(any(target_os = "windows", target_os = "linux"), not(target_env = "ohos")))]
