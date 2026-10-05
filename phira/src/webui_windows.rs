@@ -121,6 +121,17 @@ impl WebUiHost for WryHost {
 
 
 /// WebView 线程：建 WebView，然后循环把 eval 请求转成 `evaluate_script`。
+/// 把键盘焦点交回游戏主窗口。
+///
+/// `HWND SetFocus(HWND)`。参数/返回值都是 `HWND`，在 Rust 侧用 `isize` 表示（ABI 一致）。
+///
+/// 用途见 `WebCmd::Visible` 分支：WebView2 子窗口隐藏后要显式把焦点还回来，
+/// 否则 `WM_CHAR` 永远到不了游戏窗口，游戏内输入框打不进字。
+unsafe extern "system" {
+    // `HWND SetFocus(HWND)` —— 参数/返回值都是 `HWND`，Rust 侧用 `isize`（ABI 一致）。
+    fn SetFocus(hwnd: isize) -> isize;
+}
+
 fn run_webview(hwnd: isize, cmd_rx: mpsc::Receiver<WebCmd>, ipc_cmd_tx: mpsc::Sender<WebCmd>) {
     let parent = HwndHandle(hwnd);
 
@@ -204,6 +215,19 @@ fn run_webview(hwnd: isize, cmd_rx: mpsc::Receiver<WebCmd>, ipc_cmd_tx: mpsc::Se
                 // 真正显示 / 隐藏 WebView 窗口（ShowWindow + SetIsVisible）
                 if let Err(e) = webview.set_visible(v) {
                     tracing::error!("[webui] set_visible({v}) 失败：{e:?}");
+                }
+                // 【关键】隐藏 WebView 后**必须把键盘焦点还给游戏窗口**。
+                //
+                // WebView2 的容器是游戏窗口的 `WS_CHILD` 子窗口。它持有焦点时，Windows
+                // 会把 `WM_KEYDOWN` / `WM_CHAR` 投递给**它**，宿主窗口的 WndProc 一条都收
+                // 不到 —— miniquad 自然也不会产生 `Event::Char`，macroquad 的
+                // `get_char_pressed()` 永远为空。
+                //
+                // 症状就是：**游戏内的自绘输入框能看到、光标在闪，却一个字也打不进去**
+                // （PC 端）。而 `ShowWindow(SW_HIDE)` 只是隐藏窗口，Windows **不保证**把
+                // 焦点交回父窗口，所以这里显式 `SetFocus`。
+                if !v {
+                    unsafe { SetFocus(hwnd) };
                 }
             }
             Ok(WebCmd::Quit) => break,
