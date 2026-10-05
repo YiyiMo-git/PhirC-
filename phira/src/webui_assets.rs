@@ -31,3 +31,54 @@ pub fn load_asset(path: &str) -> Option<(Vec<u8>, &'static str)> {
     };
     Some((data.to_vec(), mime))
 }
+
+/// 把开始页做成**完全自包含的单文件 HTML**：所有 `./assets/*` 引用换成 base64 data URI。
+///
+/// # 为什么 iOS 需要这个
+///
+/// iOS 上没法像 Windows（`webui://` 自定义协议）或 Android（`shouldInterceptRequest`）
+/// 那样给 WebView 喂「自定义来源」的资源 —— `WKWebView` 那套要写 `WKURLSchemeHandler`
+/// 协议实现，成本与风险都高。而 `file://` 也不行：
+///
+/// `index.html:415` 有 `gl.texImage2D(gl.TEXTURE_2D, ..., img)`，其中 `img.src` 是
+/// `./assets/TriGridBase.png`（`index.html:428`）。`file://` 下 WebKit 把它判成跨源，
+/// `texImage2D` 直接抛 SecurityError，**整个背景光波消失** —— 这个坑工程文档里已经记过一次。
+///
+/// 内联成 data URI 后，页面是同源文档，既没有跨源问题也不需要任何自定义协议。
+/// 代价是字符串变大（字体 13MB → base64 ~18MB），只在加载那一刻占内存。
+///
+/// 逻辑刻意放在 Rust 侧（而不是 ObjC 里），是为了**能在 Windows 上编译验证**。
+pub fn build_inlined_index_html() -> Option<String> {
+    let (html_bytes, _) = load_asset("index.html")?;
+    let mut out = String::from_utf8(html_bytes).ok()?;
+
+    // 引用形式与 `index.html` 里实际出现的写法一一对应：
+    //   `url('./assets/cmdysj.ttf')`（CSS font-face）
+    //   `src="./assets/3.png"` / `src="./assets/phirc.png"`（img 标签）
+    //   `img.src = './assets/TriGridBase.png';`（JS）
+    for name in ["TriGridBase.png", "phirc.png", "3.png", "cmdysj.ttf"] {
+        let Some((data, mime)) = load_asset(&format!("assets/{name}")) else {
+            continue;
+        };
+        let uri = format!("data:{mime};base64,{}", base64_encode(&data));
+        out = out.replace(&format!("'./assets/{name}'"), &format!("'{uri}'"));
+        out = out.replace(&format!("\"./assets/{name}\""), &format!("\"{uri}\""));
+    }
+    Some(out)
+}
+
+/// 标准 base64（无换行）。不引额外依赖：就这几行。
+fn base64_encode(data: &[u8]) -> String {
+    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = ((chunk[0] as u32) << 16) | (b1 << 8) | b2;
+        s.push(T[(n >> 18) as usize & 63] as char);
+        s.push(T[(n >> 12) as usize & 63] as char);
+        s.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
+        s.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+    }
+    s
+}

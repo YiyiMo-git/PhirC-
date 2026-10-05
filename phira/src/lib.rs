@@ -40,6 +40,8 @@ mod webui;
 mod webui_assets;
 #[cfg(all(target_os = "android", feature = "webui"))]
 mod webui_android;
+#[cfg(all(target_os = "ios", feature = "webui"))]
+mod webui_ios;
 #[cfg(all(target_os = "windows", feature = "webui"))]
 mod webui_windows;
 

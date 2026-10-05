@@ -26,6 +26,23 @@ fn main() {
     println!("cargo:rustc-env=GIT_HASH={}", git_hash);
 
     build_ios_motion();
+    build_ios_webui();
+}
+
+/// iOS：WebView 开始页宿主（WKWebView），用 Objective-C 包一层。
+///
+/// 与 [`build_ios_motion`] 同一套路：只在 iOS 目标下编，其它平台完全跳过，
+/// 所以 Windows / Android 构建不受影响。WebKit / UIKit 都是系统框架，让链接器带上即可。
+fn build_ios_webui() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os != "ios" {
+        return;
+    }
+    println!("cargo:rerun-if-changed=ios/webui.m");
+    cc::Build::new().file("ios/webui.m").compile("phira_webui_ios");
+    println!("cargo:rustc-link-lib=framework=WebKit");
+    println!("cargo:rustc-link-lib=framework=UIKit");
+    println!("cargo:rustc-link-lib=framework=Foundation");
 }
 
 /// iOS：把 CoreMotion 包一层极小的 Objective-C（读加速度计给「摇一摇再玩」用）。

@@ -192,9 +192,27 @@ pub fn init_host() {
         }
         return;
     }
+    #[cfg(all(target_os = "ios", feature = "webui"))]
+    {
+        match crate::webui_ios::IosHost::new() {
+            Ok(host) => {
+                *WEBUI_HOST.lock().unwrap() = Some(Box::new(host));
+                // 与 Windows/Android 同理：WKWebView 是在主线程异步建的，
+                // 这里还不算「已嵌入」，等首次 show() 时再置位。
+                tracing::info!("[webui] iOS WKWebView 宿主已创建，等待首次显示时建 WebView");
+            }
+            Err(err) => {
+                tracing::error!("[webui] iOS WebView 宿主创建失败，回退到原生 UI：{err:?}");
+                *WEBUI_HOST.lock().unwrap() = Some(Box::new(StubHost));
+                WEBUI_EMBEDDED.store(false, Ordering::Relaxed);
+            }
+        }
+        return;
+    }
     #[cfg(not(any(
         all(target_os = "windows", feature = "webui"),
-        all(target_os = "android", feature = "webui")
+        all(target_os = "android", feature = "webui"),
+        all(target_os = "ios", feature = "webui")
     )))]
     {
         *WEBUI_HOST.lock().unwrap() = Some(Box::new(StubHost));
