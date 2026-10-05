@@ -285,9 +285,24 @@ public class MainActivity extends Activity {
     // 符号：Java_org_1flos_1phira_1modded_MainActivity_webui*
     // Rust 侧只关心「建好没有 / 灌资源 / 切可见 / 执行 JS / 加载首页」。
 
+    /**
+     * WebView 宿主所在 Activity（供静态入口投递到 UI 线程用）。
+     *
+     * <p>⚠️ 这几个静态入口是 Rust 从**游戏线程**调的，而 `webUIView` 是在
+     * **UI 线程**异步创建的。原来它们直接同步读 `webUIView`，于是：
+     * Rust 紧接着 `webuiCreate` 调 `webuiSetVisible(true)` 时 `webUIView` 往往
+     * 还是 null → **这次「显示请求」被静默丢弃** → `wantVisible` 一直 false →
+     * 页面加载完也保持 GONE → 只看到原生界面。
+     *
+     * <p>现在统一 `runOnUiThread` 投递：所有请求进同一条 UI 线程队列、**按调用顺序
+     * 执行**，于是 `create` 一定先跑完，后面的 `setVisible` 才看得到非空实例。
+     */
+    private static Activity webuiActivity;
+
     /** 在 UI 线程创建 WebView（幂等）。 */
     public static void webuiCreate(final Activity activity) {
         if (activity == null) return;
+        webuiActivity = activity;
         activity.runOnUiThread(new Runnable() {
             @Override
             public void run() {
@@ -303,25 +318,45 @@ public class MainActivity extends Activity {
         });
     }
 
-    /** 把一份内嵌资源交给 WebView（WebView 未就绪时先进静态缓冲表）。 */
+    /** 把一份内嵌资源交给 WebView。
+     *  <p>这条**不需要**投递：`WebUIView.ASSETS` 是一张加锁的静态表，任何线程任何时刻写都对。 */
     public static void webuiPutAsset(String path, byte[] data) {
         WebUIView.putAssetStatic(path, data);
     }
 
-    /** 加载首页（幂等）。 */
+    /** 加载首页（幂等）。投到 UI 线程，保证在 `create` 之后执行。 */
     public static void webuiLoadHome() {
-        WebUIView v = webUIView;
-        if (v != null) v.loadHome();
+        final Activity a = webuiActivity;
+        if (a == null) return;
+        a.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (webUIView != null) webUIView.loadHome();
+            }
+        });
     }
 
+    /** 切可见。投到 UI 线程，保证在 `create` 之后执行（否则会被丢弃）。 */
     public static void webuiSetVisible(final boolean visible) {
-        WebUIView v = webUIView;
-        if (v != null) v.setVisible(visible);
+        final Activity a = webuiActivity;
+        if (a == null) return;
+        a.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (webUIView != null) webUIView.setVisible(visible);
+            }
+        });
     }
 
-    public static void webuiEval(String js) {
-        WebUIView v = webUIView;
-        if (v != null) v.evaluate(js);
+    public static void webuiEval(final String js) {
+        final Activity a = webuiActivity;
+        if (a == null) return;
+        a.runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (webUIView != null) webUIView.evaluate(js);
+            }
+        });
     }
 
     public static boolean webuiReady() {
@@ -330,6 +365,19 @@ public class MainActivity extends Activity {
     }
 
     public static void webuiDestroy() {
+        final Activity a = webuiActivity;
+        webuiActivity = null;
+        if (a != null) {
+            a.runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    WebUIView v = webUIView;
+                    webUIView = null;
+                    if (v != null) v.destroy();
+                }
+            });
+            return;
+        }
         WebUIView v = webUIView;
         webUIView = null;
         if (v != null) v.destroy();

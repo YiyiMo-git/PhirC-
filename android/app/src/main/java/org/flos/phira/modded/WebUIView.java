@@ -193,6 +193,17 @@ public final class WebUIView {
                 ViewGroup.LayoutParams.MATCH_PARENT));
         wv.setVisibility(View.GONE);
         this.webView = wv;
+
+        // 【关键】建完立刻加载首页 —— **不要**依赖外部调 `webuiLoadHome()`。
+        //
+        // 原来 Rust 的 `show()` 是「先推资源、再建 WebView」，而 `push_assets_once()`
+        // 末尾就调 `webuiLoadHome()` —— 那一刻 `webUIView` 还是 null，调用被静默丢弃，
+        // 于是 WebView 建出来后**从来没导航过任何页面**：永远 GONE、`onPageFinished`
+        // 永不触发、`webuiOnReady` 永不回调 → 一直显示原生 UI。
+        //
+        // 放在这里就与外部调用顺序无关了：资源是加锁的静态表（推没推完都能读），
+        // `loadHome()` 自身也有 `loaded` 幂等保护。
+        loadHome();
     }
 
     /** 加载首页（幂等）。 */
@@ -253,8 +264,14 @@ public final class WebUIView {
         });
     }
 
-    /** JS 侧 {@code window.AndroidBridge.postMessage(json)} 的落点。 */
-    private final class Bridge {
+    /**
+     * JS 侧 {@code window.AndroidBridge.postMessage(json)} 的落点。
+     *
+     * <p>刻意声明成 {@code public static} 而不是私有内部类：`addJavascriptInterface`
+     * 的桥接类要被 JS 反射调用，静态化可以避免隐式持有外部实例，也让可访问性更稳妥
+     * （它本身就只用静态成员）。
+     */
+    public static final class Bridge {
         @JavascriptInterface
         public void postMessage(String json) {
             // 所有 JNI 符号必须挂在 quad_native.QuadNative 下（见该类顶部注释）。
