@@ -261,6 +261,11 @@ pub struct GameScene {
     effects: Vec<Effect>,
 
     first_in: bool,
+    /// 噪区是否已经做过**完整预加载**（材质编译 + effect/aux/scene 三张纹理的显存分配）。
+    ///
+    /// 必须在首帧、`update_size` 把渲染目标尺寸定下来之后做，所以不能放在 `new()` 里。
+    /// 只做一次；之后噪区出现时就只剩纯绘制。
+    block_prewarmed: bool,
     exercise_range: Range<f64>,
     exercise_press: Option<(i8, u64)>,
     exercise_btns: (RectButton, RectButton),
@@ -459,11 +464,6 @@ impl GameScene {
 
         let music = Self::new_music(&mut res)?;
         crate::core::reset_block_effects();
-        // 预渲染：在**加载阶段**把噪域的着色器编译 + 显存分配全部做掉。
-        // 原来这些都堆在「第一次真的出现噪域」那一帧，表现就是进图卡一下。
-        // 这里只做分配与编译，不产生任何画面输出，观赏度不变。
-        let prewarm_aspect = res.aspect_ratio;
-        crate::core::prewarm_block(&mut res, prewarm_aspect);
         Ok(Self {
             should_exit: false,
             next_scene: None,
@@ -480,6 +480,7 @@ impl GameScene {
             info_offset,
 
             first_in: false,
+            block_prewarmed: false,
             exercise_range,
             exercise_press: None,
             exercise_btns: (RectButton::new(), RectButton::new()),
@@ -2208,6 +2209,18 @@ impl Scene for GameScene {
         let asp = ui.viewport.2 as f32 / ui.viewport.3 as f32;
         if res.update_size(ui.viewport) || self.mode == GameMode::View {
             set_camera(&res.camera);
+        }
+
+        // 噪区**完整预加载**：必须放在 `update_size` 之后 —— 噪区的 effect/aux/scene
+        // 三张纹理是按**渲染目标**尺寸分配的，而渲染目标由 `update_size` 决定。
+        // 放在 `GameScene::new` 里会用到屏幕尺寸，到第一帧还是得重新分配一次。
+        //
+        // 这里首帧就把「材质编译 + 全部显存分配 + 通道渲染到贴图」一次做完，
+        // 之后噪区出现时只剩纯绘制，不会再有卡顿。
+        if !self.block_prewarmed {
+            self.block_prewarmed = true;
+            let aspect = res.aspect_ratio;
+            crate::core::prewarm_block(res, aspect);
         }
 
         let msaa = res.config.sample_count > 1;
