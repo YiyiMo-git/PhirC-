@@ -1303,6 +1303,8 @@ impl Page for HomePage {
             // （同一块矩形只用一个 RectButton 判定，避免两个按钮抢同一次点击。）
             if let Some(last) = self.char_pick_last {
                 if rt - last < DOUBLE_CLICK_WINDOW {
+                    // 双击：只要相册选择器，**不**展开角色详情（直接 return，下面的
+                    // 面板展开逻辑不执行）
                     self.char_pick_last = None;
                     prpr::scene::request_file("home_char");
                     return Ok(true);
