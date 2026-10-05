@@ -363,6 +363,13 @@ impl Scene for MainScene {
     }
 
     fn touch(&mut self, tm: &mut TimeManager, touch: &Touch) -> Result<bool> {
+        // 自绘输入框是**模态**的：它存在时把触摸全部吃掉，不让底下的页面 / 外壳跟着
+        // 响应（否则点「取消」会顺带点到它背后的按钮）。输入框自己的按钮命中读的是
+        // 本帧的原始触摸（`Judge::get_touches()`），不经过这里，所以照样点得到 ——
+        // 和引擎自带 `DIALOG` 的拦截方式一致（`prpr::scene::Main::update` 里那个分支）。
+        if prpr::scene::has_pending_input() {
+            return Ok(true);
+        }
         if self.state.fader.transiting() {
             return Ok(false);
         }
@@ -1011,6 +1018,13 @@ impl Scene for MainScene {
             let total = self.batch_import_total;
             ui.full_loading(itl!("batch-importing", "current" => current, "total" => total), s.t);
         }
+
+        // 自绘文本输入框：取代 `inputbox` 的原生对话框（理由见 `ui::input_dialog` 的模块注释）。
+        // 画在本帧最上层（页面 / 外壳 / 联机面板 / 导入进度之后），这样多页面叠加时也能盖住它们；
+        // 没有待处理请求时它什么都不画。
+        // ⚠️ 只有 MainScene 在栈顶时才会走到这里：独立场景（SongScene / ProfileScene /
+        // GameScene 等）里发出的 request_input 不会被渲染（见模块注释的「生效范围」）。
+        crate::ui::input_dialog::render(ui, t);
 
         Ok(())
     }

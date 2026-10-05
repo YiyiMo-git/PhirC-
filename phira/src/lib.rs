@@ -33,6 +33,8 @@ mod scene;
 mod tabs;
 mod tags;
 mod threed;
+/// 应用自绘的功能件（目前是取代原生对话框的文本输入框）。
+mod ui;
 mod uml;
 mod webui;
 /// 开始页内嵌资源表（跨平台共用；Windows 走自定义协议、Android 走 Java 内存表）。

@@ -23,16 +23,16 @@ use crate::{
 };
 use anyhow::{Error, Result};
 use cfg_if::cfg_if;
-use inputbox::{
-    backend::{default_backend, Backend},
-    InputBox,
-};
+use inputbox::{backend::Backend, InputBox, InputMode};
 use macroquad::prelude::*;
 use std::{
     any::Any,
     borrow::Cow,
     cell::RefCell,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 use tracing::warn;
 
@@ -159,6 +159,47 @@ pub static INPUT_CANCELLED: Mutex<Option<String>> = Mutex::new(None);
 #[cfg(not(target_arch = "wasm32"))]
 pub static CHOSEN_FILE: Mutex<(Option<String>, Option<String>)> = Mutex::new((None, None));
 
+/// 一次待处理的「文本输入」请求，内容是 [`InputBox`] 的 owned 版本。
+///
+/// # 为什么要有它
+///
+/// 以前 [`request_input`] 直接把配置丢给 `inputbox` 的原生对话框。Android 上那个
+/// `.aar` 打不开对话框时，会把失败提示串（例如 `can't open`）当成「用户输入的文本」
+/// 回调 `QuadNative.setInputText()`，脏字符串就这样进了配置
+/// （实测：`comboText` 被存成 `"COMBOcan't open "`）。
+///
+/// 所以现在**不再调那个库的对话框**：请求在这里落成纯数据，由游戏内自绘的输入框
+/// （`phira::ui::input_dialog`）渲染 / 编辑 / 收尾。
+#[derive(Clone, Debug, Default)]
+pub struct PendingInput {
+    /// 请求序号，每次 [`request_input`] 自增。
+    ///
+    /// 自绘输入框是**无状态**函数，靠这个序号判断「这是一次新请求」（同一个 id
+    /// 被连续请求两次时，光看 id 会把上一次的编辑缓冲留下来）。
+    pub seq: u64,
+    pub id: String,
+    pub title: String,
+    pub prompt: String,
+    pub default: String,
+    pub password: bool,
+    pub multiline: bool,
+    pub ok_label: String,
+    pub cancel_label: String,
+}
+
+/// 待处理输入请求的序号源（见 [`PendingInput::seq`]）。
+static NEXT_INPUT_SEQ: AtomicU64 = AtomicU64::new(1);
+
+/// 当前待处理的输入请求；没有请求时为 `None`。
+///
+/// 用 [`pending_input`] 读、[`finish_pending_input`] / [`cancel_pending_input`] 收尾。
+pub static PENDING_INPUT: Mutex<Option<PendingInput>> = Mutex::new(None);
+
+/// 已被自绘输入框取代，保留以便必要时回退：现在没有任何调用点。
+///
+/// 要回退到原生对话框：在 `request_input` 末尾恢复
+/// `show_inputbox(config, &*inputbox::backend::default_backend());`。
+#[allow(dead_code)]
 fn show_inputbox(config: InputBox, backend: &dyn Backend) {
     let result = config.show_with_async(backend, |result| match result {
         Ok(Some(text)) => {
@@ -181,7 +222,9 @@ fn show_inputbox(config: InputBox, backend: &dyn Backend) {
 
 #[inline]
 pub fn request_input(id: impl Into<String>, mut config: InputBox) {
-    *INPUT_TEXT.lock().unwrap() = (Some(id.into()), None);
+    let id: String = id.into();
+    // 语义保持不变：请求已发出、但还没有文本；`take_input()` 在确定前返回 `None`。
+    *INPUT_TEXT.lock().unwrap() = (Some(id.clone()), None);
     *INPUT_CANCELLED.lock().unwrap() = None;
     if config.title.is_none() {
         config = config.title(ttl!("input"));
@@ -195,7 +238,54 @@ pub fn request_input(id: impl Into<String>, mut config: InputBox) {
     if config.ok_label.is_none() {
         config = config.ok_label(ttl!("confirm"));
     }
-    show_inputbox(config, &*default_backend());
+    // 不再调原生对话框（见 `PendingInput` 的说明），改成把配置转成 owned 数据，
+    // 交给游戏内自绘的输入框。
+    let pending = PendingInput {
+        seq: NEXT_INPUT_SEQ.fetch_add(1, Ordering::Relaxed),
+        id,
+        title: config.title.as_deref().unwrap_or_default().to_owned(),
+        prompt: config.prompt.as_deref().unwrap_or_default().to_owned(),
+        default: config.default.to_string(),
+        password: matches!(config.mode, InputMode::Password),
+        multiline: matches!(config.mode, InputMode::Multiline),
+        ok_label: config.ok_label.as_deref().unwrap_or_default().to_owned(),
+        cancel_label: config.cancel_label.as_deref().unwrap_or_default().to_owned(),
+    };
+    *PENDING_INPUT.lock().unwrap() = Some(pending);
+}
+
+/// 当前待处理的输入请求（克隆一份给渲染层用）。
+pub fn pending_input() -> Option<PendingInput> {
+    PENDING_INPUT.lock().unwrap().clone()
+}
+
+/// 是否有待处理的输入请求。
+///
+/// 给需要「模态拦截」的地方用（自绘输入框存在时不该让底下的页面 / 外壳继续响应触摸），
+/// 不做克隆，比 `pending_input().is_some()` 便宜。
+pub fn has_pending_input() -> bool {
+    PENDING_INPUT.lock().unwrap().is_some()
+}
+
+/// 自绘输入框点了「确定」：把文本交回给当初请求它的调用点。
+///
+/// `trim` 只去掉**首尾**空白（`str::trim` 的语义），多行输入内部的换行会原样保留。
+pub fn finish_pending_input(text: String) {
+    let pending = PENDING_INPUT.lock().unwrap().take();
+    let Some(pending) = pending else {
+        return;
+    };
+    *INPUT_TEXT.lock().unwrap() = (Some(pending.id), Some(text.trim().to_owned()));
+}
+
+/// 自绘输入框点了「取消」（或按了 Esc）：报告被取消的请求 id，并清掉输入槽。
+pub fn cancel_pending_input() {
+    let pending = PENDING_INPUT.lock().unwrap().take();
+    let Some(pending) = pending else {
+        return;
+    };
+    *INPUT_CANCELLED.lock().unwrap() = Some(pending.id);
+    *INPUT_TEXT.lock().unwrap() = (None, None);
 }
 
 pub fn take_input() -> Option<(String, String)> {
