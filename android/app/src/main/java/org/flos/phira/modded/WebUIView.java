@@ -124,9 +124,19 @@ public final class WebUIView {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         }
-        // 让页面按屏幕宽度自适应，不出现横向滚动条。
-        s.setUseWideViewPort(true);
-        s.setLoadWithOverviewMode(true);
+        // ⚠️ 比例：`ui/index.html` **没有 `<meta name=viewport>`**（逐字节冻结的原件）。
+        // 这种页面开 `useWideViewPort(true)` 会让 WebView 按默认的 980px「桌面视口」
+        // 布局、再整体缩放到屏幕宽度 —— 表现就是「所有东西都变小 / 比例不对」。
+        // 关掉它，视口就等于控件宽度（device-width），与设计稿 1:1。
+        // 同理 `loadWithOverviewMode` 也要关，否则仍会为了「塞下整页」而缩放。
+        s.setUseWideViewPort(false);
+        s.setLoadWithOverviewMode(false);
+        // 双指缩放关掉：这是全屏 UI，不是可缩放网页（顺便避免误触缩放）。
+        s.setSupportZoom(false);
+        s.setBuiltInZoomControls(false);
+        s.setDisplayZoomControls(false);
+        // 让页面按照控件宽度排版（100vw/100vh 才是真实屏幕尺寸）
+        s.setLayoutAlgorithm(WebSettings.LayoutAlgorithm.NORMAL);
 
         wv.setBackgroundColor(Color.TRANSPARENT);
         wv.addJavascriptInterface(new Bridge(), "AndroidBridge");

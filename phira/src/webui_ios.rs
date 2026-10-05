@@ -100,9 +100,14 @@ impl IosHost {
             return;
         };
         unsafe { phira_webui_create(html.as_ptr(), on_ipc_cb) };
+        // 【关键】注入「装 IPC 桥 + 绑定 5 个按钮」的初始化脚本。
+        // 与 Android 同样的道理：不注入就没有按钮监听、也没有 `__phira_recv`。
+        // 脚本自身会等 DOM 就绪（DOMContentLoaded + 50×100ms 轮询）再 `bind()`，
+        // 又是幂等的，所以紧接着 create 注入是安全的。
+        Self::eval(crate::webui::START_PAGE_INIT_SCRIPT);
         // 与 Windows/Android 同语义：请求已发出，主场景可以把渲染交给 WebView
         crate::webui::set_webui_embedded(true);
-        tracing::info!("[webui-ios] 已请求在 UI 线程创建 WKWebView");
+        crate::webui::diag("已请求在 UI 线程创建 WKWebView，界面脚本已注入");
     }
 
     fn eval(js: &str) {

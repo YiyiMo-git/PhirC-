@@ -261,8 +261,19 @@ pub fn on_ipc(json: String) {
 /// **只有到这里才能置 `WEBUI_EMBEDDED`** —— 那一步会让主场景停止 Rust 渲染、
 /// 把画面完全交给 WebView。提前置位 = 黑屏（WebView 还没内容而 Rust 又不画了）。
 pub fn on_ready() {
+    // 【关键】注入「装 IPC 桥 + 绑定 5 个按钮」的初始化脚本。
+    //
+    // Windows 靠 wry 的 `with_initialization_script` 在文档创建时注入；
+    // **Android 没有这个机制**，而之前完全漏了注入，后果就是：
+    //   * 5 个按钮的 `addEventListener` 从未绑定 → 点了只跑 HTML 自己的 console.log
+    //      → 用户看到的「所有按钮点不动」；
+    //   * `window.__phira_recv` 不存在 → IPC 回包没人接。
+    //
+    // 在 `onPageFinished` 之后注入是安全的：脚本内部会等 DOM 就绪再 `bind()`，
+    // 而且它是幂等的（靠 `__phiraStartPageBridgeInstalled` 标记）。
+    AndroidHost::eval(crate::webui::START_PAGE_INIT_SCRIPT);
     crate::webui::set_webui_embedded(true);
-    crate::webui::diag("WebView 已就绪，界面交给 WebView");
+    crate::webui::diag("WebView 已就绪，已注入界面脚本，界面交给 WebView");
 }
 
 /// Java 侧查询 WebView 是否已就绪（WebView 实例已建好）。

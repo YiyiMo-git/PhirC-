@@ -119,139 +119,6 @@ impl WebUiHost for WryHost {
     }
 }
 
-/// 注入到**每一个**页面的初始化脚本（`with_initialization_script`）。
-///
-/// 为什么用注入而不是改 HTML：开始页 `ui/index.html` 是用户给的成品（要求逐字节照搬，
-/// SHA256 固定），里面 5 个按钮只 `console.log`（原文件第 479 行「按钮点击（占位）」），
-/// 而且**没有**引 `bridge.js`，所以 `window.__PHIRA__` / `window.__phira_recv` 都不存在。
-/// 这里在文档创建时（页面自己的脚本之前）补上最小 IPC 实现，并把 5 个按钮接到 Rust 原生逻辑：
-///   开始游玩 → open_rust_page{page:library}（原生曲库） / 资源包 / 设置 / 活动 / 上次游玩。
-///
-/// 注意：
-/// - 用 `addEventListener` **追加**监听，绝不 `removeEventListener`，不动原文件自己的占位监听；
-/// - 初始化脚本可能在 DOM 之前执行，所以 DOMContentLoaded + 短轮询双重兜底再挂载；
-/// - 幂等：重复注入 / 重复挂载都用标记位挡掉；
-/// - **IPC 出口按平台自动选**（与 `ui/bridge.js` 的平台分支一致）：
-///   Windows/wry 走 `window.ipc`，Android 走 `window.AndroidBridge`，iOS 走 `webkit.messageHandlers`。
-pub(crate) const START_PAGE_INIT_SCRIPT: &str = r#"
-(function () {
-  'use strict';
-  if (window.__phiraStartPageBridgeInstalled) return;
-  window.__phiraStartPageBridgeInstalled = true;
-
-  var seq = 0;
-  var pending = {};
-
-  /* ---------- 按平台选 IPC 出口（与 ui/bridge.js 的分支一致） ---------- */
-  function post(json) {
-    if (window.ipc && typeof window.ipc.postMessage === 'function') {
-      window.ipc.postMessage(json);
-      return true;
-    }
-    if (window.AndroidBridge && typeof window.AndroidBridge.postMessage === 'function') {
-      window.AndroidBridge.postMessage(json);
-      return true;
-    }
-    if (window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.phira
-        && typeof window.webkit.messageHandlers.phira.postMessage === 'function') {
-      window.webkit.messageHandlers.phira.postMessage(json);
-      return true;
-    }
-    return false;
-  }
-
-  /* ---------- 最小 invoke（形状与 ui/bridge.js 一致：{id, cmd, args}） ---------- */
-  function invoke(cmd, args) {
-    return new Promise(function (resolve, reject) {
-      var id = ++seq;
-      pending[id] = { resolve: resolve, reject: reject };
-      if (!post(JSON.stringify({ id: id, cmd: cmd, args: args || {} }))) {
-        delete pending[id];
-        reject(new Error('IPC 桥不可用（不在 WebView 里？）'));
-        return;
-      }
-      // 超时兜底，避免 Promise 永远挂着（与 bridge.js 一致：20s）
-      setTimeout(function () {
-        if (pending[id]) { delete pending[id]; reject(new Error('IPC 超时：' + cmd)); }
-      }, 20000);
-    });
-  }
-
-  /* ---------- Rust → JS 回包入口（页面没引 bridge.js，这里补最小实现） ---------- */
-  if (typeof window.__phira_recv !== 'function') {
-    window.__phira_recv = function (json) {
-      var msg;
-      try { msg = typeof json === 'string' ? JSON.parse(json) : json; } catch (e) { return; }
-      if (msg && msg.id != null && pending[msg.id]) {
-        var p = pending[msg.id];
-        delete pending[msg.id];
-        if (msg.error != null) p.reject(new Error(String(msg.error)));
-        else p.resolve(msg.result);
-      }
-    };
-  }
-
-  /* ---------- 5 个按钮 → Rust 原生逻辑 ---------- */
-  var HANDLERS = {
-    'btn-start': function () { return invoke('open_rust_page', { page: 'library' }); },   // 原生曲库
-    'btn-res': function () { return invoke('open_rust_page', { page: 'respack' }); },     // 资源包
-    'btn-settings': function () { return invoke('open_rust_page', { page: 'settings' }); }, // 设置
-    'btn-activity': function () { return invoke('open_rust_page', { page: 'event' }); },  // 活动
-    'btn-last': function () { return invoke('start_last_chart'); }                        // 上次游玩的谱面
-  };
-
-  function bind() {
-    Object.keys(HANDLERS).forEach(function (id) {
-      var el = document.getElementById(id);
-      if (!el || el.__phiraBound) return;
-      el.__phiraBound = true;
-      // 追加监听：原文件自己的占位监听保持不变
-      el.addEventListener('click', function () {
-        try {
-          HANDLERS[id]().catch(function (e) { console.error('[phirc] ' + id + ' 失败', e); });
-        } catch (e) {
-          console.error('[phirc] ' + id + ' 异常', e);
-        }
-      });
-    });
-  }
-
-  function start() {
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', onReady);
-    } else {
-      onReady();
-    }
-    // 兜底：DOM 结构晚于 DOMContentLoaded 就绪（或元素被动态替换）时再挂几次
-    var tries = 0;
-    var timer = setInterval(function () {
-      bind();
-      if (++tries >= 50) clearInterval(timer);
-    }, 100);
-  }
-
-  function onReady() {
-    bind();
-    // ⚠️ 右上角头像注入**已停用** —— 见 `installAccount` 的注释。
-    // 账号功能现在在「设置 → 账号」页（原生 UI），这里不再往 DOM 里塞东西。
-  }
-
-  /* ---------- （已停用）右上角：头像 + 名字 ----------
-   *
-   * 曾经在开始页右上角注入「头像 + 名字」当登录入口，但 `index.html` 的 `.logo`
-   * 本来就占着 `top:30px; right:30px` —— 注入的元素**把用户的 logo 挡住了**。
-   *
-   * 现在账号管理完整落在「设置 → 账号」页（原生 UI，添加 / 切换 / 删除），
-   * 所以这里**彻底删掉**了注入代码，不再往 DOM 里加任何东西。
-   *
-   * ⚠️ 教训：删这段时曾留下半截函数体（孤立 `}` + 已删掉的 `ACCOUNT_STYLE`），
-   * 那是 **JS 语法错误** —— 注入脚本一报错，整个 bridge（含 5 个按钮的监听）
-   * 都不再执行。改这个字符串后**务必确认 JS 括号配平**（Rust 编译不检查 JS！）。
-   */
-
-  start();
-})();
-"#;
 
 /// WebView 线程：建 WebView，然后循环把 eval 请求转成 `evaluate_script`。
 fn run_webview(hwnd: isize, cmd_rx: mpsc::Receiver<WebCmd>, ipc_cmd_tx: mpsc::Sender<WebCmd>) {
@@ -293,7 +160,7 @@ fn run_webview(hwnd: isize, cmd_rx: mpsc::Receiver<WebCmd>, ipc_cmd_tx: mpsc::Se
         })
         // 注入开始页桥接脚本：不改 `ui/index.html`（逐字节照搬）也能让 5 个按钮生效。
         // 初始化脚本每次页面加载都会执行，且早于页面自身的脚本。
-        .with_initialization_script(START_PAGE_INIT_SCRIPT)
+        .with_initialization_script(crate::webui::START_PAGE_INIT_SCRIPT)
         .with_url("webui://webui/index.html");
 
     // 显式标注类型，既清晰又消除「未使用 import」告警。
