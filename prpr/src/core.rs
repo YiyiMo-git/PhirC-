@@ -34,6 +34,8 @@ mod block_audio;
 pub(crate) use block_audio::BlockAudio;
 pub use block_shader::{draw_disabled_zones, draw_zones, draw_zones_with_touches, Zone};
 pub(crate) use block_shader::reset_block_effects;
+/// 噪区着色器的编译错误（None = 编译成功）。给「设置 → 日志」页显示。
+pub use block_shader::{force_init as force_block_shader_init, shader_error as block_shader_error};
 
 /// 噪域贴图的运行时查找。
 ///

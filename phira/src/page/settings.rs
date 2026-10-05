@@ -2679,6 +2679,19 @@ impl LogList {
     /// 重新读取日志（只保留最后 200 行，避免超大文件卡住渲染）。
     fn reload(&mut self) {
         self.lines.clear();
+        // 先把「噪区着色器编译错误」放最前面 —— 它是「噪区变成一片纯红方块」的
+        // 直接原因（MATERIAL 建不出来 → 走兜底画红方块），而且以前手机上完全看不到。
+        // `force_block_shader_init()` 会触发一次编译尝试，这样没打过含噪区的谱面也能读到。
+        prpr::core::force_block_shader_init();
+        match prpr::core::block_shader_error() {
+            Some(err) => {
+                self.lines.push("[block-shader] 噪区着色器编译失败！噪区会退化成纯红方块：".to_owned());
+                for l in err.lines().take(12) {
+                    self.lines.push(format!("[block-shader] {l}"));
+                }
+            }
+            None => self.lines.push("[block-shader] 噪区着色器编译成功 ✅".to_owned()),
+        }
         let Some(path) = Self::log_path() else {
             self.lines.push("（无法确定数据目录）".to_owned());
             return;

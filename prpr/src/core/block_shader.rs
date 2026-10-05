@@ -203,12 +203,38 @@ fn load_block_material(disabled: bool) -> Result<Material, miniquad::ShaderError
     })
 }
 
+/// 噪区着色器编译失败的原因（成功则为 None）。
+///
+/// 为什么需要它：`MATERIAL` 为 `None` 时噪区会走兜底 —— **画一片纯红方块**
+/// （见 [`draw_layer_at`] 里的 `else` 分支）。而 `MATERIAL` 只会在**着色器编译失败**
+/// 时为 None。以前这个错误只 `tracing::warn!`（手机上没 adb 看不到）并写到
+/// exe 同级的 `block_shader_error.txt`（Android 上根本拿不到）。
+///
+/// 现在存进这个静态量，由 `phira` 的「设置 → 日志」页显示出来 —— 手机端截图即可定位。
+static SHADER_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// 取噪区着色器的编译错误（供「设置 → 日志」页显示）。
+pub fn shader_error() -> Option<String> {
+    SHADER_ERROR.lock().ok().and_then(|it| it.clone())
+}
+
+/// 强制初始化 `MATERIAL`（触发一次着色器编译尝试），让 [`shader_error`] 有值。
+///
+/// 日志页在**还没打过含噪区的谱面**时会读不到错误 —— 所以打开日志页时先调一次这个。
+pub fn force_init() {
+    Lazy::force(&MATERIAL);
+}
+
 static MATERIAL: Lazy<Option<[Material; 2]>> = Lazy::new(|| {
     (|| Ok([load_block_material(true)?, load_block_material(false)?]))()
         .map_err(|e: miniquad::ShaderError| {
-            tracing::warn!("block-area shader failed: {e}");
+            let msg = format!("{e}");
+            tracing::warn!("block-area shader failed: {msg}");
+            if let Ok(mut slot) = SHADER_ERROR.lock() {
+                *slot = Some(msg.clone());
+            }
             if let Ok(exe) = std::env::current_exe() {
-                let _ = std::fs::write(exe.with_file_name("block_shader_error.txt"), format!("{e}"));
+                let _ = std::fs::write(exe.with_file_name("block_shader_error.txt"), &msg);
             }
         })
         .ok()
