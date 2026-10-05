@@ -1,0 +1,16 @@
+[package]
+name = "phira-main"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+
+[features]
+default = ["video"]
+video = ["phira/video"]
+# 透传 phira 的 webui：开启后用 `phira/ui/index.html`（已照搬 kaichang/index.html）
+# 作为界面，而不是 macroquad 原生 UI。
+# 构建：cargo build --release -p phira-main --no-default-features --features webui
+webui = ["phira/webui"]
+
+[dependencies]
+phira = { workspace = true, default-features = false }

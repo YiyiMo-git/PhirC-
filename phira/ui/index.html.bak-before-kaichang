@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
+<title>Phirc Mod++</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- TriGrid 背景（WebGL2，着色器照搬 kaichang/rust/index.html 原版） -->
+<canvas id="trigrid"></canvas>
+
+<!-- ============================================================
+     页面 1：登录
+     ============================================================ -->
+<div class="page" id="page-login">
+  <div class="login-card acrylic">
+    <div class="login-logo">PH</div>
+    <div class="login-title">Phirc Mod++</div>
+    <div class="login-sub">登录后才能浏览在线曲库</div>
+
+    <div class="login-form">
+      <div class="field">
+        <label>用户名 / 邮箱</label>
+        <input id="login-user" type="text" autocomplete="username" spellcheck="false">
+      </div>
+      <div class="field">
+        <label>密码</label>
+        <input id="login-pass" type="password" autocomplete="current-password">
+      </div>
+      <div class="login-err" id="login-err"></div>
+      <button class="btn accent block" id="login-submit">登 录</button>
+      <button class="btn block" id="login-skip" style="margin-top:10px">先看看本地谱面</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     页面 2：开始界面（照 phira/page/home.rs）
+     ============================================================ -->
+<div class="page" id="page-home">
+  <div class="home-left" id="home-char">
+    <img src="assets/3.png" alt="" onerror="this.style.display='none'">
+  </div>
+  <div class="home-logo">
+    <img src="assets/phirc.png" alt="Phirc" onerror="this.style.display='none'">
+  </div>
+
+  <div class="home-menu">
+    <div class="glass-btn main" id="btn-start">
+      <span class="cn">开始游玩</span>
+      <span class="en">GAME</span>
+      <span class="arrow">
+        <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+      </span>
+    </div>
+    <div class="glass-btn sec" id="btn-res"><span>资源包</span></div>
+    <div class="home-row">
+      <div class="glass-btn" id="btn-settings"><span>设置</span></div>
+      <div class="glass-btn" id="btn-activity"><span>活动</span></div>
+    </div>
+    <div class="glass-btn white" id="btn-last"><span>上次游玩的谱面</span></div>
+  </div>
+
+  <div class="home-version">Version: v 3.2</div>
+</div>
+
+<!-- ============================================================
+     页面 3：曲库（照 phira/page/library.rs）
+     ============================================================ -->
+<div class="page" id="page-library">
+  <div class="lib-back" id="lib-back">
+    <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+  </div>
+
+  <div class="lib-head">
+    <div class="lib-search">
+      <svg viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.5 15.5 21 21"/></svg>
+      <input id="lib-search" type="text" placeholder="搜索曲名或曲师…" spellcheck="false">
+    </div>
+
+    <div class="lib-chips" id="lib-chips">
+      <div class="lib-chip on" data-order="updated">默认</div>
+      <div class="lib-chip" data-order="name">曲名</div>
+      <div class="lib-chip" data-order="difficulty">难度</div>
+      <div class="lib-chip" data-order="rating">评分</div>
+      <div class="lib-chip" id="lib-orderdir" title="正序 / 倒序">↓</div>
+    </div>
+
+    <div class="lib-spacer"></div>
+  </div>
+
+  <div class="lib-strip" id="lib-strip">
+    <div class="lib-tab on" data-cat="local">本地</div>
+    <div class="lib-tab" data-cat="ranked">上架</div>
+    <div class="lib-tab" data-cat="special">特殊</div>
+    <div class="lib-tab" data-cat="unstable">未上架</div>
+    <div class="lib-tab" data-cat="popular">热门</div>
+  </div>
+
+  <div class="lib-grid" id="lib-grid"></div>
+
+  <div class="lib-user" id="lib-user">
+    <span id="lib-user-name">未登录</span>
+    <b id="lib-user-rks"></b>
+  </div>
+</div>
+
+<!-- ============================================================
+     页面 4：谱面预选（原来这里是 Rust 的 SongScene，现在改成 Web 界面）
+     ============================================================ -->
+<div class="page" id="page-song">
+  <div class="lib-back" id="song-back">
+    <svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg>
+  </div>
+
+  <div class="song-panel acrylic">
+    <div class="song-hero">
+      <img id="song-cover" alt="">
+      <div class="song-hero-ph" id="song-cover-ph"></div>
+      <div class="song-hero-shade"></div>
+      <div class="song-hero-meta">
+        <div class="song-name" id="song-name"></div>
+        <div class="song-by" id="song-by"></div>
+      </div>
+      <div class="song-badge" id="song-level"></div>
+    </div>
+    <div class="song-info">
+      <div class="song-row"><span>曲师</span><b id="song-composer">-</b></div>
+      <div class="song-row"><span>谱师</span><b id="song-charter">-</b></div>
+      <div class="song-row"><span>难度</span><b id="song-level2">-</b></div>
+    </div>
+
+    <div class="song-config-layout">
+      <section class="song-settings-block">
+        <div class="section-head"><strong>本曲 MOD</strong><span>仅影响当前曲目</span></div>
+        <div class="mod-grid" id="song-mod-grid"></div>
+      </section>
+
+      <section class="song-settings-block quick-settings">
+        <div class="section-head"><strong>预选功能</strong><span>保存到全局设置</span></div>
+        <label class="setting-range"><span>游玩速度 <b id="song-speed-value">100%</b></span><input id="song-speed" type="range" min="50" max="200" step="5" value="100"></label>
+        <label class="setting-range"><span>判定偏移 <b id="song-offset-value">0 ms</b></span><input id="song-offset" type="range" min="-300" max="300" step="1" value="0"></label>
+        <div class="quick-toggle-row">
+          <button class="setting-toggle" data-setting="autoplay">自动游玩</button>
+          <button class="setting-toggle" data-setting="judgeText">判定文字</button>
+          <button class="setting-toggle" data-setting="noteTrail">音符拖影</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="song-actions">
+      <button class="btn" id="song-settings-open">更多设置</button>
+      <div class="glass-btn main" id="song-play">
+        <span class="cn">开始游玩</span>
+        <span class="arrow">
+          <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+        </span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     页面 5：重做后的设置面板（WebView 内导航，退出回当前页面）
+     ============================================================ -->
+<div class="page" id="page-settings">
+  <button class="lib-back" id="settings-back" aria-label="返回"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
+  <div class="manager-shell settings-shell">
+    <header class="manager-head">
+      <div><div class="eyebrow">PHIRA / CONTROL CENTER</div><h1>游玩设置</h1><p>游戏手感、音频与画面参数，修改后自动保存。</p></div>
+      <div class="save-state" id="settings-save-state">已同步</div>
+    </header>
+    <div class="settings-scroll">
+      <section class="setting-section">
+        <div class="section-head"><strong>游玩手感</strong><span>PLAY FEEL</span></div>
+        <div class="setting-card-grid">
+          <label class="setting-range"><span>游玩速度 <b id="set-speed-value">100%</b></span><input id="set-speed" type="range" min="50" max="200" step="5"></label>
+          <label class="setting-range"><span>判定偏移 <b id="set-offset-value">0 ms</b></span><input id="set-offset" type="range" min="-300" max="300" step="1"></label>
+          <label class="setting-range"><span>音符大小 <b id="set-note-scale-value">100%</b></span><input id="set-note-scale" type="range" min="50" max="200" step="5"></label>
+        </div>
+        <div class="setting-toggle-grid">
+          <button class="setting-toggle" data-setting="autoplay">自动游玩</button>
+          <button class="setting-toggle" data-setting="showAcc">显示 ACC</button>
+          <button class="setting-toggle" data-setting="showAvgFps">显示平均帧率</button>
+          <button class="setting-toggle" data-setting="judgeText">判定文字</button>
+        </div>
+      </section>
+      <section class="setting-section">
+        <div class="section-head"><strong>音频与特效</strong><span>AUDIO / FX</span></div>
+        <div class="setting-card-grid">
+          <label class="setting-range"><span>音乐音量 <b id="set-volume-music-value">100%</b></span><input id="set-volume-music" type="range" min="0" max="100" step="1"></label>
+          <label class="setting-range"><span>音效音量 <b id="set-volume-sfx-value">100%</b></span><input id="set-volume-sfx" type="range" min="0" max="100" step="1"></label>
+          <label class="setting-range"><span>首页音乐 <b id="set-volume-bgm-value">100%</b></span><input id="set-volume-bgm" type="range" min="0" max="100" step="1"></label>
+        </div>
+        <div class="setting-toggle-grid">
+          <button class="setting-toggle" data-setting="noteTrail">音符拖影</button>
+          <button class="setting-toggle" data-setting="disableEffect">简化打击特效</button>
+          <button class="setting-toggle" data-setting="particle">粒子特效</button>
+        </div>
+      </section>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================
+     页面 6：资源包管理（WebView 内导航，退出回原页面）
+     ============================================================ -->
+<div class="page" id="page-respacks">
+  <button class="lib-back" id="respacks-back" aria-label="返回"><svg viewBox="0 0 24 24"><path d="M15 5l-7 7 7 7"/></svg></button>
+  <div class="manager-shell respack-shell">
+    <header class="manager-head">
+      <div><div class="eyebrow">PHIRA / CUSTOMIZATION</div><h1>资源包</h1><p>切换谱面音符贴图、打击特效与按键音。</p></div>
+      <button class="btn accent" id="respack-import">导入资源包</button>
+    </header>
+    <div class="respack-content">
+      <div class="respack-list" id="respack-list"></div>
+      <aside class="respack-preview acrylic" id="respack-preview">
+        <div class="section-head"><strong>贴图预览</strong><span id="respack-preview-author"></span></div>
+        <div class="preview-note-row" id="respack-preview-notes"></div>
+        <div class="respack-description" id="respack-description">选择资源包查看作者与说明。</div>
+      </aside>
+    </div>
+  </div>
+</div>
+
+<!-- 背景开关：状态存在 data.json 里，关掉后就不绘制网格背景 -->
+<div id="bg-toggle" title="开关背景网格">
+  <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.4"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M18.7 5.3l-1.6 1.6M6.9 17.1l-1.6 1.6"/></svg>
+  <span id="bg-toggle-text">背景 开</span>
+</div>
+
+<div id="toast"></div>
+
+<script src="bridge.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,60 @@
+inner.rs
+
+/target
+/assets/font.ttf
+/cache
+/data
+/.cargo
+/config.txt
+/assets/background.jpg
+/assets/res
+/monitor-config.yml
+/.vscode
+
+/prpr-avc/static-lib
+
+# Mac
+
+._*
+.DS_Store
+/run_ios.sh
+/prebuild_ios.sh
+/build_ios.sh
+/build
+/*.ipa
+/phira.app
+/phira.xcodeproj/project.xcworkspace/xcuserdata/
+/xcode/LocalSigning.xcconfig
+/dist
+/project.yml
+/prpr.scent
+/.cargo
+
+# Test
+
+/test
+/log*
+/build_event_debug.sh
+
+
+# OHOS
+
+/phira/dist/
+
+# 内置默认资源包（Phigros 官方资源，不随仓库分发）
+assets/Phigros.zip
+
+# 本地构建产物 / 发布目录（含 exe 与历史备份，近 100MB，不入库）
+/rev
+/release
+/publish
+/dist-发布
+
+# 编译器崩溃转储（rustc ICE）
+/rustc-ice-*.txt
+
+# Android 本地 SDK 路径（含本机绝对路径）
+local.properties
+/android/local.properties
+/android/.gradle
+
