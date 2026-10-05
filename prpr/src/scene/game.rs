@@ -2205,17 +2205,6 @@ impl Scene for GameScene {
             set_camera(&res.camera);
         }
 
-        // ⚠️ 这里原来有一次「噪区完整预加载」（`prewarm_block`），已**移除**。
-        //
-        // 原因：那个实现是借 `draw_layer_at` 走一遍「分配 + 编译」的路径，但
-        // `draw_layer_at` **同时会真的画一次全屏 shader pass**（`gl_use_material` +
-        // `draw_rectangle`）。虽然喂的是 0 不透明度的 dummy zone，但 shader 里
-        // **红色 spark 粒子不依赖掩码**，于是首帧会多刷一层红色粒子 —— 属于改样式。
-        // 用户明确要求「只优化性能、不改样式」，所以宁可不要这点收益。
-        //
-        // 正确的做法应该是不经绘制路径、直接分配那几张纹理（要复刻尺寸计算），
-        // 但那块涉及 MSAA / 多 pass 状态，改错会黑屏；在能实测之前不做。
-
         let msaa = res.config.sample_count > 1;
 
         let chart_onto = res

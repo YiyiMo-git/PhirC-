@@ -38,11 +38,6 @@ pub(super) struct Masks {
 /// 台阶，看起来偏"粗"。桌面端有算力，这里提到 **1/4（4 像素一格）**，台阶数翻倍、
 /// 边缘更细。代价是逐像素工作量 ×4（灰阶路径只在噪区淡入的 0.5 秒内走，可接受）。
 /// 想更细可以改 2，但要先优化 `render_gray_rings` 的逐像素膨胀。
-///
-/// ⚠️ 2026-10 复盘：曾经按平台把它分流成「移动端 1/8」想省性能，结果**噪区几乎消失**
-/// （只剩 shader 里那些不依赖掩码的红色 spark 粒子）—— 掩码分辨率直接决定噪区形状，
-/// 改它就是改样式。用户明确要求「只优化性能、不改样式」，所以**统一回到 4**。
-/// 性能改由「内循环消除重复计算 + 触摸掩码循环优化」来拿（那些才是字节等价的）。
 const MASK_DIVISOR: usize = 4;
 
 impl Masks {
@@ -118,9 +113,6 @@ impl Masks {
                 let (sr, sg) = subtract_disabled(self.layers[3][i], self.raw_disabled_green[i]);
                 let disabled = unorm((sr * sg - n).abs());
                 let (_, ready_sg) = subtract_disabled(self.layers[5][i], self.ready_green[i]);
-                // 这四个值只依赖 (x, y)，原来在 2x2 内层被重算了 4 遍（含 f32 转换与 unorm）
-                let layer4 = self.layers[4][i];
-                let ready = unorm(ready_sg);
                 for dy in 0..2 {
                     for dx in 0..2 {
                         let (xx, yy) = (x * 2 + dx, y * 2 + dy);
@@ -129,8 +121,8 @@ impl Masks {
                         self.rgba[dst + 3] = disabled;
                         // The Active material's misleading "Disabled" names
                         // actually bind the ready-only camera outputs (Start).
-                        self.aux_rgba[dst] = layer4;
-                        self.aux_rgba[dst + 1] = ready;
+                        self.aux_rgba[dst] = self.layers[4][i];
+                        self.aux_rgba[dst + 1] = unorm(ready_sg);
                         self.aux_rgba[dst + 2] = disabled;
                         if mask != 0 {
                             self.active[yy * stride + xx / 64] |= 1 << (xx % 64);
