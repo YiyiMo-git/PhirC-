@@ -377,6 +377,16 @@ impl Page for SettingsPage {
             })
         })?;
 
+        // Phira 自带登录界面必须在**全屏**上画。
+        //
+        // 它按全屏面板设计（`home.rs` 也是在页面最外层渲染它），而我一开始把它放在
+        // `AccountList::render` 里 —— 那是在设置列表的**滚动区**内，于是被裁剪、
+        // 布局按列表宽度算 → 用户看到的「登录界面变形」。
+        // 这里提到滚动区之外、页面最上层画。
+        if matches!(self.tabs.selected(), SettingListType::Account) {
+            self.list_account.render_login_overlay(ui, t);
+        }
+
         Ok(())
     }
 
@@ -2604,11 +2614,18 @@ impl AccountList {
                 (0., 0.5),
             );
         }
-        // Phira 自带登录界面**画在最上层**（和 home.rs 一样，最后画 = 覆盖在上面）
+        // 登录界面**不在这里画** —— 它按全屏设计，必须由 `SettingsPage::render`
+        // 在滚动区之外调用 `render_login_overlay`，否则会被裁剪/变形。
+        (w, h)
+    }
+
+    /// 在全屏层上绘制 Phira 自带登录界面（由 `SettingsPage::render` 调用）。
+    ///
+    /// 组件内部自己判断可见性：没点开登录时 `render` 是不画东西的。
+    fn render_login_overlay(&mut self, ui: &mut Ui, t: f32) {
         if let Some(login) = &mut self.login {
             login.render(ui, t);
         }
-        (w, h)
     }
 }
 

@@ -124,18 +124,21 @@ public final class WebUIView {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         }
-        // ⚠️ 比例：`ui/index.html` **没有 `<meta name=viewport>`**（逐字节冻结的原件）。
-        // 这种页面开 `useWideViewPort(true)` 会让 WebView 按默认的 980px「桌面视口」
-        // 布局、再整体缩放到屏幕宽度 —— 表现就是「所有东西都变小 / 比例不对」。
-        // 关掉它，视口就等于控件宽度（device-width），与设计稿 1:1。
-        // 同理 `loadWithOverviewMode` 也要关，否则仍会为了「塞下整页」而缩放。
-        s.setUseWideViewPort(false);
+        // ⚠️ 视口：`ui/index.html` 是**宽屏桌面设计**（都写死 px）：
+        //   `.right-panel { right:60px; width:460px }`、`.logo { right:30px; width:200px }`。
+        // 在**手机宽度**（约 800 CSS px）下，460px 的面板要占 58% 屏宽，直接压到右上角
+        // 的 logo 上 —— 用户报的「按钮太大完全遮住 logo」。
+        //
+        // 正确做法：让页面按一个**固定的设计宽度**布局，再由 WebView 整体缩放到屏幕。
+        // 这里保留 `useWideViewPort(true)`（这样 `<meta viewport>` 才会被尊重），
+        // 设计宽度由注入的 viewport meta 指定（见 `START_PAGE_INIT_SCRIPT`）。
+        s.setUseWideViewPort(true);
+        // 但不要为了「塞下整页」再缩放一次，否则会二次缩小、比例再次走样。
         s.setLoadWithOverviewMode(false);
         // 双指缩放关掉：这是全屏 UI，不是可缩放网页（顺便避免误触缩放）。
         s.setSupportZoom(false);
         s.setBuiltInZoomControls(false);
         s.setDisplayZoomControls(false);
-        // 让页面按照控件宽度排版（100vw/100vh 才是真实屏幕尺寸）
         s.setLayoutAlgorithm(WebSettings.LayoutAlgorithm.NORMAL);
 
         wv.setBackgroundColor(Color.TRANSPARENT);

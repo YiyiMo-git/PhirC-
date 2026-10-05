@@ -1062,9 +1062,35 @@ pub const START_PAGE_INIT_SCRIPT: &str = r#"
   }
 
   function onReady() {
+    // 先装视口（原因见 installViewport 的注释），再绑定按钮。
+    installViewport();
     bind();
-    // ⚠️ 右上角头像注入**已停用** —— 见 `installAccount` 的注释。
-    // 账号功能现在在「设置 → 账号」页（原生 UI），这里不再往 DOM 里塞东西。
+  }
+
+  /* ---------- 视口：固定设计宽度 ----------
+   *
+   * `ui/index.html` 是**宽屏桌面设计**，尺寸全是写死的 px：
+   *   `.right-panel { right:60px; width:460px }`、`.logo { right:30px; width:200px }`
+   * 而它自己**没有** `<meta name="viewport">`（逐字节冻结的原件，不能加）。
+   *
+   * 若按手机宽度（约 800 CSS px）布局，460px 的面板要占 58% 屏宽，会直接压住
+   * 右上角的 logo —— 用户报的「开始菜单按钮太大完全遮住 logo」。
+   *
+   * 指定固定设计宽度后，整页按设计稿比例排版，再由 WebView 缩放到屏幕宽度，
+   * 各元素的相对位置就与设计稿一致（面板 36% / logo 16%，不再重叠）。
+   */
+  var DESIGN_WIDTH = 1280;
+
+  function installViewport() {
+    var head = document.head || document.documentElement;
+    if (!head) return;
+    var m = document.querySelector('meta[name="viewport"]');
+    if (!m) {
+      m = document.createElement('meta');
+      m.name = 'viewport';
+      head.appendChild(m);
+    }
+    m.content = 'width=' + DESIGN_WIDTH + ', user-scalable=no, minimum-scale=0.2, maximum-scale=5';
   }
 
   /* ---------- （已停用）右上角：头像 + 名字 ----------
