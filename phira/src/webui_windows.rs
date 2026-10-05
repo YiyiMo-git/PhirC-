@@ -218,9 +218,9 @@ pub(crate) const START_PAGE_INIT_SCRIPT: &str = r#"
 
   function start() {
     if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', bind);
+      document.addEventListener('DOMContentLoaded', onReady);
     } else {
-      bind();
+      onReady();
     }
     // 兜底：DOM 结构晚于 DOMContentLoaded 就绪（或元素被动态替换）时再挂几次
     var tries = 0;
@@ -228,6 +228,121 @@ pub(crate) const START_PAGE_INIT_SCRIPT: &str = r#"
       bind();
       if (++tries >= 50) clearInterval(timer);
     }, 100);
+  }
+
+  function onReady() {
+    bind();
+    installAccount();
+    // 拉一次真实的账号信息（未登录会返回 null，头像显示「未登录」）
+    refreshMe();
+  }
+
+  /* ---------- 右上角：头像 + 名字（登录入口） ----------
+   *
+   * 为什么用注入而不是写进 HTML：`ui/index.html` 是逐字节冻结的成品（SHA256 固定），
+   * 里面**完全没有**账号相关元素 —— 结果开始页没有任何登录入口。
+   * 这里在**所有平台共用的注入脚本**里把它补上，于是 Windows / Android / iOS 一起有，
+   * 而且 HTML 一个字节都不动。
+   *
+   * 数据来自已有的 IPC：`get_me` 返回持久化的 `me`（含 avatar / name），
+   * 未登录时点击弹输入框，走 `login`；已登录时点击可退出，走 `logout`。
+   */
+  var ACCOUNT_STYLE = [
+    '#phira-account{position:fixed;top:18px;right:20px;z-index:9999;display:flex;',
+    'align-items:center;gap:10px;padding:6px 14px 6px 6px;border-radius:999px;',
+    'background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.18);',
+    '-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);cursor:pointer;',
+    'transition:background .18s,border-color .18s;user-select:none;',
+    'font-family:inherit;-webkit-tap-highlight-color:transparent}',
+    '#phira-account:hover{background:rgba(255,255,255,.18);border-color:rgba(255,255,255,.30)}',
+    '#phira-account img,#phira-account .ph-ava-fallback{width:38px;height:38px;border-radius:50%;',
+    'object-fit:cover;flex:0 0 auto;display:block;background:rgba(255,255,255,.14)}',
+    '#phira-account .ph-ava-fallback{display:flex;align-items:center;justify-content:center;',
+    'font-size:19px;color:rgba(255,255,255,.75)}',
+    '#phira-account .ph-name{color:rgba(255,255,255,.92);font-size:15px;max-width:150px;',
+    'overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+    '#phira-account .ph-sub{color:rgba(255,255,255,.55);font-size:12px}',
+    '#phira-account .ph-col{display:flex;flex-direction:column;align-items:flex-start;line-height:1.25}',
+  ].join('');
+
+  function installAccount() {
+    if (document.getElementById('phira-account')) return;
+    var st = document.createElement('style');
+    st.id = 'phira-account-style';
+    if (!document.getElementById('phira-account-style')) document.head.appendChild(st);
+    st.textContent = ACCOUNT_STYLE;
+
+    var el = document.createElement('div');
+    el.id = 'phira-account';
+    el.title = '账号：点击登录 / 退出';
+    document.body.appendChild(el);
+    el.addEventListener('click', onAccountClick);
+    renderAccount();
+  }
+
+  function renderAccount() {
+    var el = document.getElementById('phira-account');
+    if (!el) return;
+    var me = null;
+    try { me = JSON.parse(localStorage.getItem('phira_me_cache') || 'null'); } catch (e) { me = null; }
+    var name = (me && me.name) ? String(me.name) : '';
+    var avatar = (me && me.avatar) ? String(me.avatar) : '';
+
+    var ava;
+    if (avatar) {
+      ava = document.createElement('img');
+      ava.src = avatar;
+      ava.alt = '';
+    } else {
+      ava = document.createElement('div');
+      ava.className = 'ph-ava-fallback';
+      ava.textContent = name ? name.charAt(0) : '?';
+    }
+    var col = document.createElement('div');
+    col.className = 'ph-col';
+    var n1 = document.createElement('div');
+    n1.className = name ? 'ph-name' : 'ph-sub';
+    n1.textContent = name || '未登录';
+    col.appendChild(n1);
+    if (name && me && me.rks != null) {
+      var n2 = document.createElement('div');
+      n2.className = 'ph-sub';
+      n2.textContent = 'RKS ' + Number(me.rks).toFixed(2);
+      col.appendChild(n2);
+    }
+    el.textContent = '';
+    el.appendChild(ava);
+    el.appendChild(col);
+  }
+
+  function refreshMe() {
+    return invoke('get_me').then(function (me) {
+      try { localStorage.setItem('phira_me_cache', JSON.stringify(me || null)); } catch (e) {}
+      renderAccount();
+      return me;
+    }).catch(function () { return null; });
+  }
+
+  function onAccountClick() {
+    var cached = null;
+    try { cached = JSON.parse(localStorage.getItem('phira_me_cache') || 'null'); } catch (e) {}
+    if (cached && cached.name) {
+      if (window.confirm('已登录：' + cached.name + '\n\n点「确定」退出登录，点「取消」取消。')) {
+        invoke('logout').then(refreshMe).catch(function (e) { alert('退出失败：' + e); });
+      }
+      return;
+    }
+    var email = window.prompt('登录 Phira\n\n请输入邮箱：', '');
+    if (!email) return;
+    var pwd = window.prompt('请输入密码：', '');
+    if (!pwd) return;
+    invoke('login', { username: email, password: pwd }).then(function () {
+      return refreshMe();
+    }).then(function (me) {
+      if (me && me.name) alert('登录成功：' + me.name);
+    }).catch(function (e) {
+      alert('登录失败：' + e);
+    });
   }
 
   start();
