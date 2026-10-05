@@ -69,8 +69,12 @@ jobs:
           cache-on-failure: "true"
           cache-all-crates: "true"
 
+      # --no-default-features 关掉 video（不依赖 FFmpeg）；--features webui 打开
+      # WebView 开始页（iOS 侧 = WebKit 的 WKWebView + phira/ios/webui.m 胶水）。
+      # 注意：这里跑 cargo check 也会执行 build.rs，所以能顺带验证 webui.m 能否编译
+      # （Objective-C 语法错误会在这里暴露出来，不必等到出 IPA）。
       - name: cargo check
-        run: cargo check -p phira-main --no-default-features
+        run: cargo check -p phira-main --no-default-features --features webui
 
   ipa:
     name: Build unsigned IPA
