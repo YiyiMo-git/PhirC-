@@ -24,6 +24,7 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
+import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 
 import java.io.File;
@@ -89,6 +90,77 @@ class QuadSurface extends SurfaceView implements View.OnTouchListener, View.OnKe
         // 游戏线程会一直等这条消息才开始建 EGL 上下文，记一笔方便确认「到底有没有画面」
         CrashLog.stage("surfaceChanged " + width + "x" + height);
         QuadNative.surfaceOnSurfaceChanged(holder.getSurface(), width, height);
+    }
+
+    /**
+     * 让系统输入法有地方「提交文本」。
+     *
+     * ⚠️ 这是**移动端能打字的关键**：`SurfaceView` 默认不提供输入连接，于是
+     * `InputMethodManager.showSoftInput(view, 0)` 之后输入法虽然弹出来了，
+     * `commitText` 却无处可去 —— 字符永远到不了原生层。表现就是
+     * 「键盘弹出来了、但一个字都打不进去」。这里接上，把输入法提交的文本逐字符
+     * 转发给 `QuadNative.surfaceOnCharacter`（miniquad 已有该 JNI 入口），
+     * 删除键转发成 `surfaceOnKeyDown/Up(KEYCODE_DEL)`，「完成」键转发成 Enter。
+     */
+    @Override
+    public InputConnection onCreateInputConnection(android.view.inputmethod.EditorInfo outAttrs) {
+        outAttrs.inputType = android.text.InputType.TYPE_CLASS_TEXT
+                | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+                | android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
+        outAttrs.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+                | android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN;
+        return new android.view.inputmethod.BaseInputConnection(this, false) {
+            @Override
+            public boolean commitText(CharSequence text, int newCursorPosition) {
+                if (text != null) {
+                    for (int i = 0; i < text.length(); i++) {
+                        QuadNative.surfaceOnCharacter(text.charAt(i));
+                    }
+                }
+                return true;
+            }
+
+            @Override
+            public boolean setComposingText(CharSequence text, int newCursorPosition) {
+                // 中文等输入法会先送「组合中」的文本；一并转发，避免预编辑内容丢失。
+                return commitText(text, newCursorPosition);
+            }
+
+            @Override
+            public boolean finishComposingText() {
+                return true;
+            }
+
+            @Override
+            public boolean deleteSurroundingText(int beforeLength, int afterLength) {
+                for (int i = 0; i < beforeLength; i++) {
+                    QuadNative.surfaceOnKeyDown(KeyEvent.KEYCODE_DEL);
+                    QuadNative.surfaceOnKeyUp(KeyEvent.KEYCODE_DEL);
+                }
+                return true;
+            }
+
+            @Override
+            public boolean sendKeyEvent(KeyEvent event) {
+                if (event.getKeyCode() == KeyEvent.KEYCODE_DEL) {
+                    if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                        QuadNative.surfaceOnKeyDown(KeyEvent.KEYCODE_DEL);
+                    } else {
+                        QuadNative.surfaceOnKeyUp(KeyEvent.KEYCODE_DEL);
+                    }
+                    return true;
+                }
+                return super.sendKeyEvent(event);
+            }
+
+            @Override
+            public boolean performEditorAction(int actionCode) {
+                // 输入法右下角那个「完成 / 前往」按钮 = 回车（用来确认游戏内输入框）。
+                QuadNative.surfaceOnKeyDown(KeyEvent.KEYCODE_ENTER);
+                QuadNative.surfaceOnKeyUp(KeyEvent.KEYCODE_ENTER);
+                return true;
+            }
+        };
     }
 
     @Override
