@@ -1813,8 +1813,19 @@ impl Scene for SongScene {
         // 吃掉 —— 既防止底下的编辑面板跟着响应，也防止「确定 / 取消」按钮底下重叠的
         // 输入框按钮把同一次点击再吃一遍（输入框刚关上又立刻弹开）。
         // 对话框自身的按钮命中读的是原始触摸（Judge::get_touches()），不受影响。
+        // ⚠️ 返回 **`Ok(false)`**，不是 `Ok(true)`！
+        //
+        // 引擎派发触摸用的是 `touches.retain_mut(|touch| match scene.touch(touch) { Ok(val) => !val, .. })`
+        // —— 即**返回 `true` 的触摸会被从列表里移除**，之后 `self.touches` 就少了它，
+        // `ui.set_touches()` 自然也拿不到，而自绘输入框的按钮命中正是读 `ui.touches()`。
+        //
+        // 之前这里写 `Ok(true)`：触摸被守卫"消费"掉并从列表移除 → 输入框的
+        // **确定 / 取消按钮全部失效**（用户实测「确认按钮经常失效」，只有键盘回车还能用）。
+        //
+        // `Ok(false)` 的效果恰好是我们想要的：**提前 return 所以底下的页面收不到**
+        // （模态拦截照旧），但触摸**保留在列表里**，引擎层的输入框能读到它。
         if prpr::scene::has_pending_input() {
-            return Ok(true);
+            return Ok(false);
         }
         if self.scene_task.is_some()
             || self.save_task.is_some()

@@ -363,8 +363,19 @@ impl Scene for MainScene {
         // 响应（否则点「取消」会顺带点到它背后的按钮）。输入框自己的按钮命中读的是
         // 本帧的原始触摸（`Judge::get_touches()`），不经过这里，所以照样点得到 ——
         // 和引擎自带 `DIALOG` 的拦截方式一致（`prpr::scene::Main::update` 里那个分支）。
+        // ⚠️ 返回 **`Ok(false)`**，不是 `Ok(true)`！
+        //
+        // 引擎派发触摸用的是 `touches.retain_mut(|touch| match scene.touch(touch) { Ok(val) => !val, .. })`
+        // —— 即**返回 `true` 的触摸会被从列表里移除**，之后 `self.touches` 就少了它，
+        // `ui.set_touches()` 自然也拿不到，而自绘输入框的按钮命中正是读 `ui.touches()`。
+        //
+        // 之前这里写 `Ok(true)`：触摸被守卫"消费"掉并从列表移除 → 输入框的
+        // **确定 / 取消按钮全部失效**（用户实测「确认按钮经常失效」，只有键盘回车还能用）。
+        //
+        // `Ok(false)` 的效果恰好是我们想要的：**提前 return 所以底下的页面收不到**
+        // （模态拦截照旧），但触摸**保留在列表里**，引擎层的输入框能读到它。
         if prpr::scene::has_pending_input() {
-            return Ok(true);
+            return Ok(false);
         }
 
         // 【开始页（WebView）可见时，触摸全部由 Rust 侧裁决】
