@@ -26,6 +26,7 @@ pub enum ImeEvent {
 
 static IME_BUFFER: Mutex<Vec<ImeEvent>> = Mutex::new(Vec::new());
 
+
 /// ObjC 每输入一个字符回调一次（**只由 iOS 的 `webui.m` 调用**）。
 #[no_mangle]
 pub extern "C" fn phira_ime_on_char(c: u32) {
@@ -55,9 +56,19 @@ pub fn drain() -> Vec<ImeEvent> {
 /// * 其他平台：仍然交给 `miniquad` 的 `show_keyboard`（Android 有实现），
 ///   本函数**不做事**，由调用方照常调 `show_keyboard`。
 pub fn show(show: bool) {
+    // ⚠️ 这里**不做** Rust 侧去重。曾经加过一个 `IME_SHOWN` 原子标记，但那会让
+    // 「系统把键盘收起（用户点收起/切换 App）后再也弹不出来」—— 因为状态还是 shown。
+    // 去重的正确位置在 ObjC：那边用 `isFirstResponder` 判断，既避免重复
+    // `becomeFirstResponder`，又能在真丢了第一响应者时重新弹。
     #[cfg(target_os = "ios")]
-    unsafe {
-        phira_ime_show(if show { 1 } else { 0 });
+    {
+        // 分步日志：万一 iOS 上「点了输入框就卡死」，crash-log 里能看到到底走到哪一步。
+        // 只有 "请求" 没有 "返回" ⇒ 卡在 ObjC 的 becomeFirstResponder 里。
+        crate::webui::diag(&format!("ime::show({show}) 请求"));
+        unsafe {
+            phira_ime_show(if show { 1 } else { 0 });
+        }
+        crate::webui::diag(&format!("ime::show({show}) 返回"));
     }
     #[cfg(not(target_os = "ios"))]
     let _ = show;

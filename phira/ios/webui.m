@@ -329,34 +329,61 @@ void phira_webui_destroy(void) {
 ///
 /// 必须在主线程操作 UIKit，所以这里 `dispatch_async` 到主队列。
 void phira_ime_show(int show) {
+    NSLog(@"[webui-ios] ime show 请求 show=%d", show);
     dispatch_async(dispatch_get_main_queue(), ^{
         if (show) {
             if (gImeField == nil) {
-                UIViewController *root = phira_root_view_controller();
-                if (root == nil || root.view == nil) {
-                    NSLog(@"[webui-ios] ime: 拿不到根视图，无法建隐藏输入框");
+                // ⚠️ 关键：隐藏输入框**挂到 UIWindow 上**，不要挂到根视图。
+                //
+                // 根视图就是 miniquad 的 `GLKView`。在 GLKView 里塞子视图 + 弹键盘，
+                // 会让键盘动画期间反复触发 `layoutSubviews` → 重建 framebuffer，
+                // 是出名的**布局递归 / 卡死**陷阱（用户实测「点击输入框当场卡死」）。
+                // window 不是 GL 视图，挂它上面就没有这个问题。
+                UIWindow *win = nil;
+                for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
+                    if (![scene isKindOfClass:[UIWindowScene class]]) {
+                        continue;
+                    }
+                    for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+                        if (w.isKeyWindow) {
+                            win = w;
+                            break;
+                        }
+                    }
+                    if (win != nil) {
+                        break;
+                    }
+                }
+                if (win == nil) {
+                    NSLog(@"[webui-ios] ime: 找不到 key window，放弃（不弹键盘，避免卡死）");
                     return;
                 }
-                // 1×1 且放在屏幕外：只要在视图层级里就能 becomeFirstResponder，
-                // 用户看不到它。
                 UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(0.0, -100.0, 1.0, 1.0)];
+                // 不参与 autoresizing：否则键盘出现时的尺寸变化会把它一起重排。
+                tf.autoresizingMask = UIViewAutoresizingNone;
                 tf.autocorrectionType = UITextAutocorrectionTypeNo;
                 tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
                 tf.spellCheckingType = UITextSpellCheckingTypeNo;
                 tf.keyboardType = UIKeyboardTypeASCIICapable;
                 tf.returnKeyType = UIReturnKeyDone;
                 if (gHandler == nil) {
-                    // 委托为空 = 回调永远不来，必须喊出来（这正是「键盘弹出但打不进字」的一种成因）
                     NSLog(@"[webui-ios] ime: gHandler 为空！委托设不上，字符回传不会发生");
                 }
                 tf.delegate = gHandler;
-                [root.view addSubview:tf];
-                gImeField = tf; // MRC：持有到 app 结束
+                [win addSubview:tf];
+                gImeField = tf;
+                NSLog(@"[webui-ios] ime: 隐藏输入框已建在 window 上");
             }
-            [gImeField becomeFirstResponder];
-            NSLog(@"[webui-ios] ime show firstResponder=%d", (int)[gImeField isFirstResponder]);
+            // 已经是第一响应者就别再调 —— 重复 becomeFirstResponder 会反复触发
+            // 键盘的 appear/布局流程。
+            if (![gImeField isFirstResponder]) {
+                BOOL ok = [gImeField becomeFirstResponder];
+                NSLog(@"[webui-ios] ime: becomeFirstResponder=%d", (int)ok);
+            }
         } else if (gImeField != nil) {
-            [gImeField resignFirstResponder];
+            if ([gImeField isFirstResponder]) {
+                [gImeField resignFirstResponder];
+            }
             NSLog(@"[webui-ios] ime hide");
         }
     });
