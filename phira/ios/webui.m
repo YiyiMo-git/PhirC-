@@ -115,20 +115,15 @@ static int gImeLogLeft = 32;
     shouldChangeCharactersInRange:(NSRange)range
                 replacementString:(NSString *)string {
     (void)textField;
-    if (string.length == 0) {
-        if (range.length > 0) {
-            NSLog(@"[webui-ios] ime backspace");
-            phira_ime_on_backspace();
+    // ⚠️ 退格**不在这里处理** —— 见 `PhiraImeField.deleteBackward`。
+    // 这里只处理「插入字符」。若在此同时处理退格，会和 `deleteBackward` 重复计数。
+    for (NSUInteger i = 0; i < string.length; i++) {
+        unsigned int c = (unsigned int)[string characterAtIndex:i];
+        if (gImeLogLeft > 0) {
+            gImeLogLeft--;
+            NSLog(@"[webui-ios] ime char=%u (%C)", c, (unichar)c);
         }
-    } else {
-        for (NSUInteger i = 0; i < string.length; i++) {
-            unsigned int c = (unsigned int)[string characterAtIndex:i];
-            if (gImeLogLeft > 0) {
-                gImeLogLeft--;
-                NSLog(@"[webui-ios] ime char=%u (%C)", c, (unichar)c);
-            }
-            phira_ime_on_char(c);
-        }
+        phira_ime_on_char(c);
     }
     // ⚠️ 这里**不写** `textField.text`：`return NO` 已经表示「不应用这次修改」，
     // 输入框里的文本本来就是空的。反过来在回调里改 `.text` 属于重入操作，
@@ -323,6 +318,33 @@ void phira_webui_destroy(void) {
     });
 }
 
+#pragma mark - 软键盘输入框子类（退格专用）
+
+/// 专门为「**退格一定能收到**」而存在的子类。
+///
+/// ⚠️ 为什么必须覆写 `deleteBackward`：
+/// 委托方法 `textField:shouldChangeCharactersInRange:replacementString:` **只在
+/// 文本框里「有内容可删」时才会被调用**。我们的隐藏输入框**始终是空的**
+/// （`shouldChange` 里返回 `NO`，从不把字符写进去），所以按退格时 UIKit 认为
+/// 「没东西可删」，**回调根本不触发** —— 表现就是**只能输入、不能删除**（用户实测）。
+///
+/// `deleteBackward` 来自 `UIKeyInput`，**只要按了删除键就会被调用**，
+/// 与文本是否为空无关，正是我们需要的入口。
+///
+/// 故意**不调 `super`**：文本本来就是空的，没有需要它做的事；调了反而可能
+/// 把状态搞乱。
+@interface PhiraImeField : UITextField
+@end
+
+@implementation PhiraImeField
+
+- (void)deleteBackward {
+    NSLog(@"[webui-ios] ime backspace");
+    phira_ime_on_backspace();
+}
+
+@end
+
 #pragma mark - iOS 软键盘桥（供 Rust 的 `phira::ime::show` 调用）
 
 /// 弹出 / 收起系统软键盘。由 Rust 侧 `phira_ime_show(i32)` 调用。
@@ -358,7 +380,8 @@ void phira_ime_show(int show) {
                     NSLog(@"[webui-ios] ime: 找不到 key window，放弃（不弹键盘，避免卡死）");
                     return;
                 }
-                UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(0.0, -100.0, 1.0, 1.0)];
+                // 用子类：退格走 `deleteBackward`（见上面的说明）
+                UITextField *tf = [[PhiraImeField alloc] initWithFrame:CGRectMake(0.0, -100.0, 1.0, 1.0)];
                 // 不参与 autoresizing：否则键盘出现时的尺寸变化会把它一起重排。
                 tf.autoresizingMask = UIViewAutoresizingNone;
                 tf.autocorrectionType = UITextAutocorrectionTypeNo;
