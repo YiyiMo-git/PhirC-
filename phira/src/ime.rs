@@ -74,10 +74,30 @@ pub fn show(show: bool) {
     let _ = show;
 }
 
+/// 把**已有文本**灌进 iOS 的隐藏输入框（打开输入框时用 `pending.default` 调一次）。
+///
+/// ⚠️ 必须做：Rust 侧一开场就有文本（例如连击文字原有的 `RECALL`），而隐藏框若是空的，
+/// 用户按退格时 UIKit 认为「没东西可删」→ **原有内容删不掉**。两边必须从同一份文本起步。
+/// 非 iOS 平台是空操作（那两端的软键盘不依赖隐藏框）。
+pub fn set_text(text: &str) {
+    #[cfg(target_os = "ios")]
+    {
+        if let Ok(c) = std::ffi::CString::new(text) {
+            unsafe {
+                phira_ime_set_text(c.as_ptr());
+            }
+        }
+    }
+    #[cfg(not(target_os = "ios"))]
+    let _ = text;
+}
+
 #[cfg(target_os = "ios")]
 unsafe extern "C" {
     /// 由 `phira/ios/webui.m` 导出：创建/唤出隐藏 `UITextField`。
     fn phira_ime_show(show: i32);
+    /// 由 `phira/ios/webui.m` 导出：把已有文本灌进隐藏输入框。
+    fn phira_ime_set_text(text: *const std::ffi::c_char);
 }
 
 #[cfg(test)]

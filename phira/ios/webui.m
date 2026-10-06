@@ -44,6 +44,8 @@ static NSString *gInitJs = nil;
 /// 软键盘每输入一个字符 / 退格一次，就回传一次。
 extern void phira_ime_on_char(unsigned int c);
 extern void phira_ime_on_backspace(void);
+/// 由 Rust 在打开输入框时调用，把**已有文本**灌进隐藏框（见 `phira_ime_set_text`）。
+extern void phira_ime_set_text(const char *text);
 
 /// 隐藏的 `UITextField` —— 只为「唤出系统键盘」而存在。
 ///
@@ -115,8 +117,7 @@ static int gImeLogLeft = 32;
     shouldChangeCharactersInRange:(NSRange)range
                 replacementString:(NSString *)string {
     (void)textField;
-    // ⚠️ 退格**不在这里处理** —— 见 `PhiraImeField.deleteBackward`。
-    // 这里只处理「插入字符」。若在此同时处理退格，会和 `deleteBackward` 重复计数。
+    // ⚠️ 退格**不在这里处理**（见 `PhiraImeField.deleteBackward`），否则会和它重复计数。
     for (NSUInteger i = 0; i < string.length; i++) {
         unsigned int c = (unsigned int)[string characterAtIndex:i];
         if (gImeLogLeft > 0) {
@@ -125,10 +126,12 @@ static int gImeLogLeft = 32;
         }
         phira_ime_on_char(c);
     }
-    // ⚠️ 这里**不写** `textField.text`：`return NO` 已经表示「不应用这次修改」，
-    // 输入框里的文本本来就是空的。反过来在回调里改 `.text` 属于重入操作，
-    // 有把输入法状态搞乱的风险（最初那版就多写了这一句）。
-    return NO;
+    // ⭐ 返回 **YES**：让隐藏框**真的累积文本**。
+    //
+    // 最初写成 `return NO`（框恒空、唯一真相在 Rust），结果 UIKit 认为「没东西可删」，
+    // **退格键根本不会投递**。现在框里的文本与 Rust 侧一一对应（都由同一批事件驱动），
+    // 退格永远有的删；顺带 iOS 的长按全选 / 粘贴也能用了。
+    return YES;
 }
 
 /// 软键盘右下角「完成」= 回车 → 自绘输入框据此确认。
@@ -341,6 +344,14 @@ void phira_webui_destroy(void) {
 - (void)deleteBackward {
     NSLog(@"[webui-ios] ime backspace");
     phira_ime_on_backspace();
+    // ⚠️ **必须调 super**：让隐藏框自身的文本也真的变短。
+    //
+    // 为什么：UIKit 的 `UITextField` 在文本为空时**可能根本不投递删除键**
+    // （它先判断「有没有东西可删」）。如果这里不调 super，框会一直是空串，
+    // 于是按退格时**连 `deleteBackward` 都不会被调用** —— 这正是
+    // 「一个字也删不掉」的根因（我上一轮只覆写却没调 super，所以没修好）。
+    // 现在框里始终有与 Rust 侧同步的文本，退格永远有的删。
+    [super deleteBackward];
 }
 
 @end
@@ -350,6 +361,24 @@ void phira_webui_destroy(void) {
 /// 弹出 / 收起系统软键盘。由 Rust 侧 `phira_ime_show(i32)` 调用。
 ///
 /// 必须在主线程操作 UIKit，所以这里 `dispatch_async` 到主队列。
+/// 把**已有文本**灌进隐藏输入框。由 Rust 打开输入框时调用（带入 `default`）。
+///
+/// ⚠️ 必须做这件事：Rust 侧一开场就有文本（例如连击文字原有的 `RECALL`），
+/// 而隐藏框若是空的，用户按退格时 UIKit 又认为「没东西可删」→ **删不掉原有内容**。
+/// 两边都从同一份文本起步，才能一一对应。
+void phira_ime_set_text(const char *text) {
+    if (text == NULL) {
+        return;
+    }
+    NSString *s = [NSString stringWithUTF8String:text];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (gImeField != nil) {
+            gImeField.text = (s != nil) ? s : @"";
+            NSLog(@"[webui-ios] ime set_text len=%lu", (unsigned long)gImeField.text.length);
+        }
+    });
+}
+
 void phira_ime_show(int show) {
     NSLog(@"[webui-ios] ime show 请求 show=%d", show);
     dispatch_async(dispatch_get_main_queue(), ^{

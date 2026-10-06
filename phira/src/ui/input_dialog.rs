@@ -111,6 +111,10 @@ pub fn render(ui: &mut Ui, t: f32) {
         // 躺在队列里，这里不排掉的话，输入框一打开就会被灌进一堆旧字符。
         while get_char_pressed().is_some() {}
         set_keyboard(true);
+        // 把初始文本也给 iOS 的隐藏输入框一份（顺序无所谓：两者都是
+        // `dispatch_async` 到主队列，FIFO 执行）。不做这一步的话，隐藏框是空的，
+        // 用户按退格时 UIKit 认为「没东西可删」→ **原有的 `RECALL` 删不掉**。
+        crate::ime::set_text(&pending.default);
         edit = Some(Edit {
             seq: pending.seq,
             text: pending.default.clone(),
