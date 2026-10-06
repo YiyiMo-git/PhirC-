@@ -20,6 +20,7 @@ mod data;
 mod history;
 mod hud;
 mod icons;
+mod ime;
 mod images;
 mod login;
 mod mp;

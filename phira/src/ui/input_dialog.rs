@@ -63,6 +63,12 @@ thread_local! {
 /// 所以这里不做平台判断；Android 走 `MainActivity.showKeyboard(boolean)`，
 /// 内部已经把异常全吃掉（`CrashLog.error("showKeyboard failed", t)`），调不炸。
 fn set_keyboard(show: bool) {
+    // ⚠️ 两条路都要走：
+    //   * `miniquad::show_keyboard` 只有 **Android** 实现了（调 activity.showKeyboard），
+    //     桌面 / iOS 都是 `native.rs` 里的空实现；
+    //   * iOS 因此**必须**走 `crate::ime` 那条（ObjC 隐藏 UITextField + becomeFirstResponder）。
+    // 不两条都调的话，iOS 上键盘永远不会弹（用户实测「iOS 无法唤出键盘输入」）。
+    crate::ime::show(show);
     unsafe { get_internal_gl() }.quad_context.show_keyboard(show);
 }
 
@@ -113,6 +119,19 @@ pub fn render(ui: &mut Ui, t: f32) {
             if !ch.is_control() {
                 edit.text.push(ch);
             }
+        // iOS 软键盘送来的事件（见 `crate::ime`）。非 iOS 平台这里恒为空。
+        for ev in crate::ime::drain() {
+            match ev {
+                crate::ime::ImeEvent::Char('\r') | crate::ime::ImeEvent::Char('\n') => {
+                    action = Some(true); // 软键盘的「完成」= 确定
+                }
+                crate::ime::ImeEvent::Char(c) if !c.is_control() => edit.text.push(c),
+                crate::ime::ImeEvent::Backspace => {
+                    edit.text.pop();
+                }
+                _ => {}
+            }
+        }
         }
     }
 

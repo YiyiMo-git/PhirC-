@@ -40,10 +40,23 @@ static int gLoaded = 0;
 /// MRC 下由 `create` 接管所有权（copy），`destroy` 释放。
 static NSString *gInitJs = nil;
 
+/// Rust 侧的两个回调（见 `phira/src/ime.rs`，`#[no_mangle] extern "C"` 导出）。
+/// 软键盘每输入一个字符 / 退格一次，就回传一次。
+extern void phira_ime_on_char(unsigned int c);
+extern void phira_ime_on_backspace(void);
+
+/// 隐藏的 `UITextField` —— 只为「唤出系统键盘」而存在。
+///
+/// 为什么需要它：`miniquad` 的 `show_keyboard` **只有 Android 实现了**，
+/// 其余平台（含 iOS）走 `native.rs` 的空实现。iOS 想弹键盘就得让某个
+/// `UIResponder` `becomeFirstResponder`，而最省事的就是一个不可见的 `UITextField`。
+/// 文本本身**不留在**这里（每次回调后清空），唯一真相在 Rust 侧。
+static UITextField *gImeField = nil;
+
 /// 接收页面 `window.webkit.messageHandlers.phira.postMessage(...)` 的消息。
 ///
 /// 注意 `WKScriptMessage.body` 在传入 JavaScript 字符串时就是 `NSString`。
-@interface PhiraWebUIMessageHandler : NSObject <WKScriptMessageHandler, WKNavigationDelegate>
+@interface PhiraWebUIMessageHandler : NSObject <WKScriptMessageHandler, WKNavigationDelegate, UITextFieldDelegate>
 @end
 
 @implementation PhiraWebUIMessageHandler
@@ -86,6 +99,36 @@ static NSString *gInitJs = nil;
     [webView evaluateJavaScript:probe completionHandler:^(id result, NSError *error) {
         NSLog(@"[webui-ios] 自检 %@ error=%@", result, error);
     }];
+}
+
+#pragma mark - 软键盘（UITextFieldDelegate）
+
+/// 软键盘输入/退格都走这里。
+///
+/// 注意 `return NO` + 清空 `text`：**不让输入框自己累积文本** —— 唯一真相在 Rust
+/// 侧（自绘输入框的 `edit.text`），这里只当「按键事件源」。若让它累积，两边状态
+/// 会不一致（Rust 删一个字、UITextField 里还留着）。
+- (BOOL)textField:(UITextField *)textField
+    shouldChangeCharactersInRange:(NSRange)range
+                replacementString:(NSString *)string {
+    if (string.length == 0) {
+        if (range.length > 0) {
+            phira_ime_on_backspace();
+        }
+    } else {
+        for (NSUInteger i = 0; i < string.length; i++) {
+            phira_ime_on_char((unsigned int)[string characterAtIndex:i]);
+        }
+    }
+    textField.text = @"";
+    return NO;
+}
+
+/// 软键盘右下角「完成」= 回车 → 自绘输入框据此确认。
+- (BOOL)textFieldShouldReturn:(UITextField *)textField {
+    (void)textField;
+    phira_ime_on_char(0x0D);
+    return YES;
 }
 
 @end
@@ -265,5 +308,40 @@ void phira_webui_destroy(void) {
         }
         gIpcFn = NULL;
         gLoaded = 0;
+    });
+}
+
+#pragma mark - iOS 软键盘桥（供 Rust 的 `phira::ime::show` 调用）
+
+/// 弹出 / 收起系统软键盘。由 Rust 侧 `phira_ime_show(i32)` 调用。
+///
+/// 必须在主线程操作 UIKit，所以这里 `dispatch_async` 到主队列。
+void phira_ime_show(int show) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (show) {
+            if (gImeField == nil) {
+                UIViewController *root = phira_root_view_controller();
+                if (root == nil || root.view == nil) {
+                    NSLog(@"[webui-ios] ime: 拿不到根视图，无法建隐藏输入框");
+                    return;
+                }
+                // 1×1 且放在屏幕外：只要在视图层级里就能 becomeFirstResponder，
+                // 用户看不到它。
+                UITextField *tf = [[UITextField alloc] initWithFrame:CGRectMake(0.0, -100.0, 1.0, 1.0)];
+                tf.autocorrectionType = UITextAutocorrectionTypeNo;
+                tf.autocapitalizationType = UITextAutocapitalizationTypeNone;
+                tf.spellCheckingType = UITextSpellCheckingTypeNo;
+                tf.keyboardType = UIKeyboardTypeASCIICapable;
+                tf.returnKeyType = UIReturnKeyDone;
+                tf.delegate = gHandler;
+                [root.view addSubview:tf];
+                gImeField = tf; // MRC：持有到 app 结束
+            }
+            [gImeField becomeFirstResponder];
+            NSLog(@"[webui-ios] ime show firstResponder=%d", (int)[gImeField isFirstResponder]);
+        } else if (gImeField != nil) {
+            [gImeField resignFirstResponder];
+            NSLog(@"[webui-ios] ime hide");
+        }
     });
 }
