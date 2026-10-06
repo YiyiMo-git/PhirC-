@@ -36,10 +36,14 @@ static UIViewController *gController = nil;
 static phira_webui_ipc_fn gIpcFn = NULL;
 static int gLoaded = 0;
 
+/// 界面脚本（`START_PAGE_INIT_SCRIPT`）的副本，供 `didFinishNavigation` 兜底再注入。
+/// MRC 下由 `create` 接管所有权（copy），`destroy` 释放。
+static NSString *gInitJs = nil;
+
 /// 接收页面 `window.webkit.messageHandlers.phira.postMessage(...)` 的消息。
 ///
 /// 注意 `WKScriptMessage.body` 在传入 JavaScript 字符串时就是 `NSString`。
-@interface PhiraWebUIMessageHandler : NSObject <WKScriptMessageHandler>
+@interface PhiraWebUIMessageHandler : NSObject <WKScriptMessageHandler, WKNavigationDelegate>
 @end
 
 @implementation PhiraWebUIMessageHandler
@@ -58,6 +62,30 @@ static int gLoaded = 0;
     if (json != NULL) {
         gIpcFn(json);
     }
+}
+
+/// 页面加载完成后：
+///   1. **兜底再注入一次界面脚本** —— 脚本自身是幂等的（`__phiraStartPageBridgeInstalled`），
+///      所以重复执行安全。`WKUserScript` 理论上够用，但实测「按钮一个都点不动」时它没生效，
+///      这里补一次，时机与 **Android 端的 `onPageFinished` 注入完全一致**。
+///   2. 跑一段**自检**并把结果打进日志 —— 桥有没有装上、messageHandler 在不在、
+///      按钮有几个，一眼就能看出断在哪一环（不用再猜）。
+- (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
+    (void)navigation;
+    if (gInitJs != nil) {
+        [webView evaluateJavaScript:gInitJs completionHandler:nil];
+    }
+    NSString *probe =
+        @"(function(){"
+         "var b=!!window.__phiraStartPageBridgeInstalled;"
+         "var hid=!!window.__phiraSetHidden;"
+         "var hm=!!(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.phira);"
+         "var n=document.querySelectorAll('[id^=\"btn-\"]').length;"
+         "return 'bridge='+b+' setHidden='+hid+' handler='+hm+' btns='+n;"
+         "})()";
+    [webView evaluateJavaScript:probe completionHandler:^(id result, NSError *error) {
+        NSLog(@"[webui-ios] 自检 %@ error=%@", result, error);
+    }];
 }
 
 @end
@@ -132,6 +160,9 @@ void phira_webui_create(const char *html, const char *init_js, phira_webui_ipc_f
                                                        forMainFrameOnly:YES];
             [cfg.userContentController addUserScript:usInit];
             [usInit release];
+            // 存一份给 didFinishNavigation 兜底用（MRC：先放旧的，再 copy 新的）
+            [gInitJs release];
+            gInitJs = [initStr copy];
         }
 
         gHandler = [[PhiraWebUIMessageHandler alloc] init];
@@ -142,6 +173,7 @@ void phira_webui_create(const char *html, const char *init_js, phira_webui_ipc_f
         wv.opaque = NO;
         wv.backgroundColor = UIColor.clearColor;
         wv.hidden = YES;
+        wv.navigationDelegate = gHandler;
         [cfg release];
 
         [root.view addSubview:wv];
