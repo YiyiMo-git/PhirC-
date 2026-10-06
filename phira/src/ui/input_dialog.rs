@@ -217,7 +217,16 @@ pub fn render(ui: &mut Ui, t: f32) {
     y += prompt_h;
 
     // 输入框
-    let field = Rect::new(x, y, inner_w, m.u(56.));
+    // 输入框 + 右侧两个快捷按钮（**退格 / 清空**）。
+    //
+    // 为什么必须有它们：移动端软键盘的退格行为**不可靠**（我们自己就踩过 iOS
+    // 「空文本框根本不投递删除键」），而且删长文本只能一个个按。
+    // 这两个按钮是**纯 Rust 侧**的操作，完全不经过输入法，任何平台都必然可用。
+    let quick_w = m.u(84.);
+    let quick_gap = m.u(10.);
+    let field = Rect::new(x, y, inner_w - quick_w * 2. - quick_gap * 2., m.u(56.));
+    let back_r = Rect::new(field.right() + quick_gap, y, quick_w, field.h);
+    let clear_r = Rect::new(back_r.right() + quick_gap, y, quick_w, field.h);
     newui::rounded(ui, field, m.u(10.), th.wash(0.06));
     newui::rounded_stroke(ui, field, m.u(10.), m.u(1.), th.wash(0.16));
 
@@ -279,12 +288,26 @@ pub fn render(ui: &mut Ui, t: f32) {
     let hp_ok = if hovered(ok_r) { 1. } else { 0. };
     newui::draw_sec_btn(ui, &m, &th, cancel_r, hp_cancel, pending.cancel_label.as_str(), newui::Icon::X);
     newui::draw_main_btn(ui, &m, &th, ok_r, hp_ok, pending.ok_label.as_str(), "");
+    // 快捷按钮：退格（左尖括号）/ 清空
+    let hp_back = if hovered(back_r) { 1. } else { 0. };
+    let hp_clear = if hovered(clear_r) { 1. } else { 0. };
+    newui::draw_sec_btn(ui, &m, &th, back_r, hp_back, "退格", newui::Icon::ChevronLeft);
+    newui::draw_sec_btn(ui, &m, &th, clear_r, hp_clear, "清空", newui::Icon::X);
 
     if action.is_none() {
         if clicked(ok_r) {
             action = Some(true);
         } else if clicked(cancel_r) {
             action = Some(false);
+        } else if clicked(back_r) {
+            // 退格：`String::pop` 按 `char` 删，不会切坏多字节字符。
+            edit.text.pop();
+            // ⚠️ 必须同步给 iOS 的隐藏输入框：它的文本现在会累积，不同步的话
+            // 两边长度会越差越多，之后按软键盘退格就会「删到别的东西」。
+            crate::ime::set_text(&edit.text);
+        } else if clicked(clear_r) {
+            edit.text.clear();
+            crate::ime::set_text(&edit.text);
         }
     }
 
