@@ -720,6 +720,27 @@ impl Login {
                         } else {
                             if let Some(user) = user {
                                 UserManager::request(user.id);
+                                // 存进「设置 → 账号」的多账号列表（供一键切换）。
+                                //
+                                // 自带登录界面**不暴露凭据**，所以只能在这里抓一次：
+                                // 拿到 `User` 的同时 `t_email` / `t_pwd` 还在手上
+                                // （下一行的 `self.t_pwd.clear()` 之后就没了）。
+                                //
+                                // ⚠️ 必须判非空：这个分支同时也是「邮箱验证」那条路径的
+                                // 出口，而验证常常发生在**重启之后**，那时两个字段都是空的 ——
+                                // 存下去就是一条没密码、切不过去的脏记录。
+                                //
+                                // 之前这里什么都没有，导致 `data.accounts` 永远是 `[]`，
+                                // 「账号管理」一张卡片都不显示（用户实测）。
+                                if !self.t_email.is_empty() && !self.t_pwd.is_empty() {
+                                    crate::page::user::remember_account(
+                                        &self.t_email,
+                                        &self.t_pwd,
+                                        user.name.clone(),
+                                        user.avatar.as_ref().map(|it| it.url.clone()).unwrap_or_default(),
+                                        user.rks,
+                                    );
+                                }
                                 get_data_mut().me = Some(user);
                                 save_data()?;
                             }
