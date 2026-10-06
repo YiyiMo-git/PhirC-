@@ -199,9 +199,31 @@ pub fn hit(pos: (f32, f32), screen: (f32, f32)) -> Option<&'static str> {
     if !(w > 0. && h > 0.) || !pos.0.is_finite() || !pos.1.is_finite() {
         return None;
     }
-    let k = h / w; // = 1 / aspect
-    let (px, py) = ui_to_page(pos.0, pos.1, k);
-    hit_in_page(px, py, DESIGN_WIDTH * k)
+    let k = h / w;
+    let page_h = DESIGN_WIDTH * k;
+    // ⚠️⚠️ 触摸坐标的空间**无法从代码上完全确定**，所以这里**两种都支持**。
+    //
+    // 为什么不能赌一种：引擎的派发路径是
+    //     `prpr::scene::Main::update()` → `update_with_mutate(|_| {})` → 恒等变换
+    //     → `scenes.last_mut().unwrap().touch(&mut self.tm, touch)`
+    // **全仓库只有 `update()` 这一处调用 `update_with_mutate`，且传的是 `|_| {}`**，
+    // 所以「引擎在派发前把像素归一化」这件事**并不成立**；`touch_transform` 只用在
+    // `Judge` 内部（谱面空间）。而 `Ui::screen_rect()` 又是 `[-1,1]` 空间、`RectButton`
+    // 直接拿 `touch.position` 去比 —— 这两件事互相矛盾，靠读代码无法定论。
+    //
+    // 猜错的代价是「5 个按钮全都没反应」，而这种机会只有一次，所以改成**量级判别**：
+    //   * 归一化 UI 坐标：x∈[-1,1]，y 上限 = 1/aspect（也 ≤ 1），即**绝对值必然 ≲ 1.5**
+    //   * 像素坐标：任何真实屏幕都是几十~几千
+    // 判据留了余量；极端情况（触摸落在左上角 1.5px 内被误判为归一化）只会落空，
+    // 绝不会误触发按钮。
+    let looks_normalized = pos.0.abs() <= 1.5 && pos.1.abs() <= 1.5;
+    let (px, py) = if looks_normalized {
+        ui_to_page(pos.0, pos.1, k)
+    } else {
+        // 像素空间：整页按设计宽排版后等比缩放到屏幕，所以两个方向同一个比例。
+        (pos.0 / w * DESIGN_WIDTH, pos.1 / h * page_h)
+    };
+    hit_in_page(px, py, page_h)
 }
 
 /// 命中入口：命中开始页按钮就执行对应动作，返回是否命中。
@@ -209,6 +231,16 @@ pub fn hit(pos: (f32, f32), screen: (f32, f32)) -> Option<&'static str> {
 /// 动作分发完全复用 [`crate::webui::invoke_button_action`]，
 /// 也就是 JS `invoke(...)` 走的那条 `handle_ipc` 通路。
 pub fn handle_touch(pos: (f32, f32), screen: (f32, f32)) -> bool {
+    // 把「原始坐标 + 判定出的空间」记进 crash-log（设置 → 日志能看到）——
+    // 真机上第一次跑就能确认到底是哪种空间，以后就不必再靠判别兜底。
+    crate::webui::diag(&format!(
+        "开始页触摸 pos=({:.3},{:.3}) screen=({:.0},{:.0}) 判定={}",
+        pos.0,
+        pos.1,
+        screen.0,
+        screen.1,
+        if pos.0.abs() <= 1.5 && pos.1.abs() <= 1.5 { "归一化" } else { "像素" }
+    ));
     let Some(btn) = hit(pos, screen) else {
         return false;
     };
@@ -473,5 +505,76 @@ mod tests {
         assert_eq!(hit_in_page(990., panel_top + PANEL_H + 1., page_h), None, "面板下方不该命中");
         // 面板内部（虽然已经溢出页面）仍按同一套规则命中
         assert_eq!(hit_in_page(990., panel_top + BTN_MAIN_H * 0.5, page_h), Some("btn-start"));
+    }
+}
+
+
+/// 像素空间（`hit()` 的 `else` 分支）与「两种空间结果一致」的独立测试。
+///
+/// 单独放一个模块，不去动已有的 `mod tests`。
+#[cfg(test)]
+mod coord_space_tests {
+    use super::*;
+
+    /// 某个按钮中心在页面坐标下的位置。
+    fn center_in_page(id: &str, page_h: f32) -> (f32, f32) {
+        let panel_top = (page_h - PANEL_H) * 0.5;
+        for &(bid, bx, by, bw, bh) in &BUTTONS {
+            if bid == id {
+                return (bx + bw * 0.5, panel_top + by + bh * 0.5);
+            }
+        }
+        panic!("unknown button {id}");
+    }
+
+    /// 像素空间：把按钮中心换算成像素坐标，应当命中同一个按钮。
+    #[test]
+    fn pixel_space_hits_the_same_buttons() {
+        for (w, h) in [(1280., 720.), (2340., 1080.), (1170., 2532.), (768., 1024.)] {
+            let page_h = DESIGN_WIDTH * (h / w);
+            for &(id, ..) in &BUTTONS {
+                let (cx, cy) = center_in_page(id, page_h);
+                let px = cx / DESIGN_WIDTH * w;
+                let py = cy / page_h * h;
+                assert_eq!(hit((px, py), (w, h)), Some(id), "像素空间 {id} @ {w}x{h}");
+            }
+        }
+    }
+
+    /// 同一个物理位置，用归一化坐标与像素坐标表达，必须得到**同一个**结果。
+    /// 这条是防止「判别阈值」把其中一种空间判错。
+    #[test]
+    fn normalized_and_pixel_spaces_agree() {
+        for (w, h) in [(1280., 720.), (2340., 1080.), (1170., 2532.)] {
+            let k = h / w;
+            let page_h = DESIGN_WIDTH * k;
+            for &(id, ..) in &BUTTONS {
+                let (cx, cy) = center_in_page(id, page_h);
+                let nx = cx / (DESIGN_WIDTH * 0.5) - 1.;
+                let ny = cy / (DESIGN_WIDTH * 0.5) - k;
+                let px = cx / DESIGN_WIDTH * w;
+                let py = cy / page_h * h;
+                assert_eq!(hit((nx, ny), (w, h)), Some(id), "归一化 {id} @ {w}x{h}");
+                assert_eq!(hit((px, py), (w, h)), Some(id), "像素 {id} @ {w}x{h}");
+            }
+        }
+    }
+
+    /// 归一化坐标的绝对值必然 ≲1，像素必然远大于阈值 —— 判别不会两边都误判。
+    #[test]
+    fn threshold_is_far_from_both_spaces() {
+        for (w, h) in [(1280., 720.), (2340., 1080.), (1170., 2532.)] {
+            let k = h / w;
+            let page_h = DESIGN_WIDTH * k;
+            let (cx, cy) = center_in_page("btn-start", page_h);
+            let nx = cx / (DESIGN_WIDTH * 0.5) - 1.;
+            let ny = cy / (DESIGN_WIDTH * 0.5) - k;
+            let px = cx / DESIGN_WIDTH * w;
+            let py = cy / page_h * h;
+            // 归一化那侧离 1.5 有量级余量
+            assert!(nx.abs() <= 1.5 && ny.abs() <= 1.5, "{w}x{h} 归一化 {nx},{ny}");
+            // 像素那侧远超阈值
+            assert!(px > 1.5 || py > 1.5, "{w}x{h} 像素 {px},{py}");
+        }
     }
 }

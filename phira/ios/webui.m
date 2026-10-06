@@ -77,12 +77,12 @@ static NSString *gInitJs = nil;
     }
     NSString *probe =
         @"(function(){"
-         "var b=!!window.__phiraStartPageBridgeInstalled;"
-         "var hid=!!window.__phiraSetHidden;"
-         "var hm=!!(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.phira);"
-         "var n=document.querySelectorAll('[id^=\"btn-\"]').length;"
-         "return 'bridge='+b+' setHidden='+hid+' handler='+hm+' btns='+n;"
-         "})()";
+         @"var b=!!window.__phiraStartPageBridgeInstalled;"
+         @"var hid=!!window.__phiraSetHidden;"
+         @"var hm=!!(window.webkit&&window.webkit.messageHandlers&&window.webkit.messageHandlers.phira);"
+         @"var n=document.querySelectorAll('[id^=\"btn-\"]').length;"
+         @"return 'bridge='+b+' setHidden='+hid+' handler='+hm+' btns='+n;"
+         @"})()";
     [webView evaluateJavaScript:probe completionHandler:^(id result, NSError *error) {
         NSLog(@"[webui-ios] 自检 %@ error=%@", result, error);
     }];
@@ -136,8 +136,8 @@ void phira_webui_create(const char *html, const char *init_js, phira_webui_ipc_f
         NSString *vp = @"width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no";
         NSString *js = [NSString stringWithFormat:
             @"var m=document.querySelector('meta[name=viewport]');"
-             "if(!m){m=document.createElement('meta');m.name='viewport';document.head.appendChild(m);}"
-             "m.content='%@';", vp];
+             @"if(!m){m=document.createElement('meta');m.name='viewport';document.head.appendChild(m);}"
+             @"m.content='%@';", vp];
         WKUserScript *us = [[WKUserScript alloc] initWithSource:js
                                                   injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
                                                forMainFrameOnly:YES];
