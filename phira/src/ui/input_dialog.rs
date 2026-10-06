@@ -74,11 +74,32 @@ fn set_keyboard(show: bool) {
 
 /// 画输入框并处理交互。`t` 是秒级时间，只用来让光标闪烁。
 ///
+
+/// 把软键盘事件并进输入缓冲。返回 `true` 表示要求「确定」（软键盘按了完成 / 回车）。
+///
+/// 抽成纯函数是为了**能单测** —— 之前它内联在渲染函数里，嵌错一层都没人发现。
+fn apply_ime_events(text: &mut String, events: Vec<crate::ime::ImeEvent>) -> bool {
+    let mut confirm = false;
+    for ev in events {
+        match ev {
+            crate::ime::ImeEvent::Char('\r') | crate::ime::ImeEvent::Char('\n') => confirm = true,
+            crate::ime::ImeEvent::Char(c) if !c.is_control() => text.push(c),
+            crate::ime::ImeEvent::Backspace => {
+                text.pop();
+            }
+            _ => {}
+        }
+    }
+    confirm
+}
+
 /// 没有待处理请求时**立刻返回**：不画任何东西，也不读键盘 / 鼠标。
 pub fn render(ui: &mut Ui, t: f32) {
     let Some(pending) = pending_input() else {
         // 请求在别处（或上一次交互里）已经结束：顺手清掉编辑缓冲。
         EDIT.with(|it| *it.borrow_mut() = None);
+        // 顺便丢掉残留的软键盘事件 —— 否则输入框关掉期间按的键会漏进**下一次**输入。
+        let _ = crate::ime::drain();
         return;
     };
 
@@ -119,19 +140,21 @@ pub fn render(ui: &mut Ui, t: f32) {
             if !ch.is_control() {
                 edit.text.push(ch);
             }
-        // iOS 软键盘送来的事件（见 `crate::ime`）。非 iOS 平台这里恒为空。
-        for ev in crate::ime::drain() {
-            match ev {
-                crate::ime::ImeEvent::Char('\r') | crate::ime::ImeEvent::Char('\n') => {
-                    action = Some(true); // 软键盘的「完成」= 确定
-                }
-                crate::ime::ImeEvent::Char(c) if !c.is_control() => edit.text.push(c),
-                crate::ime::ImeEvent::Backspace => {
-                    edit.text.pop();
-                }
-                _ => {}
-            }
         }
+        // iOS 软键盘送来的事件（见 `crate::ime`）。非 iOS 平台这里恒为空。
+        //
+        // ⚠️⚠️ 这段**必须放在 `while` 循环之外**！
+        // 曾经的写法是嵌在 `while let Some(ch) = get_char_pressed()` 的循环体里 ——
+        // 而 iOS 的软键盘**不经过 macroquad 的字符队列**，那个 while 一次都不会进入，
+        // 于是 `drain()` 永远不被调用，表现就是「键盘能唤出、但一个字也输不进去」。
+        let ime_events = crate::ime::drain();
+        if !ime_events.is_empty() {
+            // 记进 crash-log（设置→日志 / Xcode 下载容器都能看）：
+            // 有这行 = ObjC 那条回传通了，问题在别处；没有 = 委托没被调到。
+            crate::webui::diag(&format!("软键盘回传 {} 个事件", ime_events.len()));
+        }
+        if apply_ime_events(&mut edit.text, ime_events) {
+            action = Some(true); // 软键盘的「完成」= 确定
         }
     }
 
@@ -272,5 +295,43 @@ pub fn render(ui: &mut Ui, t: f32) {
             cancel_pending_input();
         }
         None => EDIT.with(|it| *it.borrow_mut() = Some(edit)),
+    }
+}
+
+#[cfg(test)]
+mod ime_apply_tests {
+    use super::*;
+    use crate::ime::ImeEvent;
+
+    #[test]
+    fn chars_append_and_backspace_pops() {
+        let mut s = String::from("RE");
+        assert!(!apply_ime_events(&mut s, vec![ImeEvent::Char('C'), ImeEvent::Char('A')]));
+        assert_eq!(s, "RECA");
+        assert!(!apply_ime_events(&mut s, vec![ImeEvent::Backspace]));
+        assert_eq!(s, "REC");
+    }
+
+    #[test]
+    fn return_requests_confirm() {
+        let mut s = String::new();
+        assert!(apply_ime_events(&mut s, vec![ImeEvent::Char('\r')]));
+        assert!(apply_ime_events(&mut s, vec![ImeEvent::Char('\n')]));
+        // 回车本身不写进文本
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn control_chars_are_ignored() {
+        let mut s = String::new();
+        assert!(!apply_ime_events(&mut s, vec![ImeEvent::Char('\u{7}'), ImeEvent::Char('A')]));
+        assert_eq!(s, "A");
+    }
+
+    #[test]
+    fn backspace_on_empty_is_safe() {
+        let mut s = String::new();
+        assert!(!apply_ime_events(&mut s, vec![ImeEvent::Backspace]));
+        assert!(s.is_empty());
     }
 }

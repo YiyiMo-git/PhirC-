@@ -53,6 +53,9 @@ extern void phira_ime_on_backspace(void);
 /// 文本本身**不留在**这里（每次回调后清空），唯一真相在 Rust 侧。
 static UITextField *gImeField = nil;
 
+/// 只打前若干条字符日志，避免刷屏（诊断用，确认通路后可以删）。
+static int gImeLogLeft = 32;
+
 /// 接收页面 `window.webkit.messageHandlers.phira.postMessage(...)` 的消息。
 ///
 /// 注意 `WKScriptMessage.body` 在传入 JavaScript 字符串时就是 `NSString`。
@@ -111,16 +114,25 @@ static UITextField *gImeField = nil;
 - (BOOL)textField:(UITextField *)textField
     shouldChangeCharactersInRange:(NSRange)range
                 replacementString:(NSString *)string {
+    (void)textField;
     if (string.length == 0) {
         if (range.length > 0) {
+            NSLog(@"[webui-ios] ime backspace");
             phira_ime_on_backspace();
         }
     } else {
         for (NSUInteger i = 0; i < string.length; i++) {
-            phira_ime_on_char((unsigned int)[string characterAtIndex:i]);
+            unsigned int c = (unsigned int)[string characterAtIndex:i];
+            if (gImeLogLeft > 0) {
+                gImeLogLeft--;
+                NSLog(@"[webui-ios] ime char=%u (%C)", c, (unichar)c);
+            }
+            phira_ime_on_char(c);
         }
     }
-    textField.text = @"";
+    // ⚠️ 这里**不写** `textField.text`：`return NO` 已经表示「不应用这次修改」，
+    // 输入框里的文本本来就是空的。反过来在回调里改 `.text` 属于重入操作，
+    // 有把输入法状态搞乱的风险（最初那版就多写了这一句）。
     return NO;
 }
 
@@ -333,6 +345,10 @@ void phira_ime_show(int show) {
                 tf.spellCheckingType = UITextSpellCheckingTypeNo;
                 tf.keyboardType = UIKeyboardTypeASCIICapable;
                 tf.returnKeyType = UIReturnKeyDone;
+                if (gHandler == nil) {
+                    // 委托为空 = 回调永远不来，必须喊出来（这正是「键盘弹出但打不进字」的一种成因）
+                    NSLog(@"[webui-ios] ime: gHandler 为空！委托设不上，字符回传不会发生");
+                }
                 tf.delegate = gHandler;
                 [root.view addSubview:tf];
                 gImeField = tf; // MRC：持有到 app 结束
