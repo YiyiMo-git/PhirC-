@@ -1,6 +1,6 @@
-use super::{chart::ChartSettings, BpmList, CtrlObject, JudgeLine, Matrix, Object, Point, Resource};
+use super::{chart::ChartSettings, AnimFloat, BpmList, CtrlObject, JudgeLine, Matrix, Object, Point, Resource};
 pub use crate::{
-    config::Mods,
+    config::{Mods, NoteMapTarget},
     judge::{HitSound, JudgeStatus},
     parse::RPE_HEIGHT,
 };
@@ -26,6 +26,41 @@ impl NoteKind {
             Self::Click => 2,
             Self::Flick => 3,
         }
+    }
+}
+
+impl Note {
+    /// 按「音符映射」把本音符整体换成另一种类型（见 [`crate::config::NoteMap`]）。
+    ///
+    /// - `target` 为 [`NoteMapTarget::Keep`]、或目标类型和当前类型相同时都不动，返回 `false`；
+    /// - 变成**长条**时 `end_time = time + hold_secs`，`end_height` 取**判定线**在 `end_time`
+    ///   的高度（与解析器里 hold 的算法一致）—— 直接用音符自己的高度会让长条长度变成 0；
+    /// - 内建打击音效（click / flick / drag）跟着类型走，RPE 自定义音效（[`HitSound::Custom`]）保留。
+    ///
+    /// 返回是否真的改了类型。
+    pub fn apply_map(&mut self, target: NoteMapTarget, hold_secs: f64, line_height: &mut AnimFloat) -> bool {
+        let new_kind = match target {
+            NoteMapTarget::Keep => return false,
+            NoteMapTarget::Tap => NoteKind::Click,
+            NoteMapTarget::Drag => NoteKind::Drag,
+            NoteMapTarget::Flick => NoteKind::Flick,
+            NoteMapTarget::Hold => {
+                let end_time = self.time + hold_secs.max(1e-3);
+                line_height.set_time(end_time);
+                NoteKind::Hold {
+                    end_time,
+                    end_height: line_height.now() as f64,
+                }
+            }
+        };
+        if std::mem::discriminant(&self.kind) == std::mem::discriminant(&new_kind) {
+            return false;
+        }
+        if !matches!(self.hitsound, HitSound::Custom(_)) {
+            self.hitsound = HitSound::default_from_kind(&new_kind);
+        }
+        self.kind = new_kind;
+        true
     }
 }
 
@@ -433,5 +468,102 @@ impl BadNote {
             );
         });
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{Anim, Keyframe, TweenId};
+
+    /// `TWEEN_FUNCTIONS[2] = |x| x`（恒等 / 线性）。用别的 id 会被缓动函数扭曲，
+    /// 断言里就得写缓动后的数，反而看不清是在测什么。
+    const TWEEN_LINEAR: TweenId = 2;
+
+    /// 判定线高度动画：t = 0 → 0，t = 1 → 100，线性 —— 查 t 处就是 `100t`。
+    fn line_height() -> AnimFloat {
+        Anim::new(vec![Keyframe::new(0., 0., TWEEN_LINEAR), Keyframe::new(1., 100., TWEEN_LINEAR)])
+    }
+
+    fn note(kind: NoteKind, time: f64) -> Note {
+        Note {
+            object: Object::default(),
+            hitsound: HitSound::default_from_kind(&kind),
+            kind,
+            time,
+            height: 0.,
+            speed: 1.,
+            color: WHITE,
+            fx_color: None,
+            judge_area: 1.,
+            above: true,
+            multiple_hint: false,
+            fake: false,
+            judge: JudgeStatus::NotJudged,
+        }
+    }
+
+    #[test]
+    fn keep_and_same_kind_are_no_ops() {
+        let mut h = line_height();
+        let mut n = note(NoteKind::Click, 1.);
+        assert!(!n.apply_map(NoteMapTarget::Keep, 0.2, &mut h));
+        // 目标类型和当前类型相同：不动
+        assert!(!n.apply_map(NoteMapTarget::Tap, 0.2, &mut h));
+        assert!(matches!(n.kind, NoteKind::Click));
+    }
+
+    #[test]
+    fn converts_between_tap_drag_flick() {
+        let mut h = line_height();
+        let mut n = note(NoteKind::Click, 1.);
+        assert!(n.apply_map(NoteMapTarget::Flick, 0.2, &mut h));
+        assert!(matches!(n.kind, NoteKind::Flick));
+        // 内建打击音效跟着类型走
+        assert!(matches!(n.hitsound, HitSound::Flick));
+
+        assert!(n.apply_map(NoteMapTarget::Drag, 0.2, &mut h));
+        assert!(matches!(n.kind, NoteKind::Drag));
+        assert!(matches!(n.hitsound, HitSound::Drag));
+    }
+
+    #[test]
+    fn hold_to_tap_drops_the_tail() {
+        let mut h = line_height();
+        let mut n = note(
+            NoteKind::Hold {
+                end_time: 5.,
+                end_height: 9.,
+            },
+            1.,
+        );
+        assert!(n.apply_map(NoteMapTarget::Tap, 0.2, &mut h));
+        assert!(matches!(n.kind, NoteKind::Click));
+        assert!(matches!(n.hitsound, HitSound::Click));
+    }
+
+    #[test]
+    fn tap_to_hold_uses_line_height_at_end_time() {
+        let mut h = line_height();
+        let mut n = note(NoteKind::Click, 0.3);
+        assert!(n.apply_map(NoteMapTarget::Hold, 0.2, &mut h));
+        match n.kind {
+            NoteKind::Hold { end_time, end_height } => {
+                // end_time = 0.3 + 0.2
+                assert!((end_time - 0.5).abs() < 1e-9, "end_time = {end_time}");
+                // 判定线在 0.5 处的高度 = 100 * 0.5；直接用音符自己的高度会让长条长度变 0
+                assert!((end_height - 50.).abs() < 1e-4, "end_height = {end_height}");
+            }
+            _ => panic!("应该变成 Hold"),
+        }
+    }
+
+    #[test]
+    fn custom_hitsound_is_preserved() {
+        let mut h = line_height();
+        let mut n = note(NoteKind::Click, 1.);
+        n.hitsound = HitSound::Custom("custom.mp3".to_owned());
+        assert!(n.apply_map(NoteMapTarget::Drag, 0.2, &mut h));
+        assert!(matches!(n.hitsound, HitSound::Custom(ref s) if s == "custom.mp3"));
     }
 }

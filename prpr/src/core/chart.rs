@@ -1,8 +1,8 @@
 use super::{
-    draw_disabled_zones, draw_zones_with_touches, reset_block_effects, BlockArea, BpmList, Effect, JudgeLine, JudgeLineKind, Matrix, Resource,
-    UIElement, Vector, Zone,
+    draw_disabled_zones, draw_zones_with_touches, reset_block_effects, BlockArea, BpmList, Effect, JudgeLine, JudgeLineCache, JudgeLineKind, Matrix,
+    NoteKind, Resource, UIElement, Vector, Zone,
 };
-use crate::{core::Object, fs::FileSystem, judge::JudgeStatus, ui::Ui};
+use crate::{config::NoteMap, core::Object, fs::FileSystem, judge::JudgeStatus, ui::Ui};
 use anyhow::{Context, Result};
 use macroquad::prelude::*;
 use nalgebra::Rotation2;
@@ -115,6 +115,34 @@ impl Chart {
             }
         }
         Ok(())
+    }
+
+    /// 应用「音符映射」：把四类音符整体换成配置里指定的类型。
+    ///
+    /// 必须在谱面解析完成（`JudgeLineCache::new` 已跑过）之后、`Judge::new` 之前调用：
+    /// 改完类型后缓存里「普通 / 非普通音符」的划分会失效，所以这里要重建缓存。
+    /// `hold_secs` 是「变成**长条**」时新长条的时长（秒）。
+    pub fn apply_note_map(&mut self, map: &NoteMap, hold_secs: f64) {
+        if map.is_identity() {
+            return;
+        }
+        for line in &mut self.lines {
+            // 判定线高度动画的副本：变成长条时用它算 end_height，不污染渲染状态。
+            let mut height = line.height.clone();
+            let mut changed = false;
+            for note in &mut line.notes {
+                let target = match note.kind {
+                    NoteKind::Click => map.tap,
+                    NoteKind::Drag => map.drag,
+                    NoteKind::Flick => map.flick,
+                    NoteKind::Hold { .. } => map.hold,
+                };
+                changed |= note.apply_map(target, hold_secs, &mut height);
+            }
+            if changed {
+                line.cache = JudgeLineCache::new(&mut line.notes);
+            }
+        }
     }
 
     pub fn reset(&mut self) {

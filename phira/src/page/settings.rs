@@ -15,7 +15,7 @@ use inputbox::InputBox;
 use macroquad::prelude::*;
 use once_cell::sync::Lazy;
 use prpr::{
-    config::Config,
+    config::{Config, NoteMapTarget},
     ext::{open_url, poll_future, LocalTask, RectExt, SafeTexture, ScaleType},
     scene::{request_file, request_input, return_file, return_input, show_error, show_message, take_file, take_input},
     task::Task,
@@ -675,6 +675,17 @@ fn render_switch(ui: &mut Ui, r: Rect, t: f32, btn: &mut DRectButton, on: bool) 
 fn right_rect(w: f32) -> Rect {
     let rh = row_h() * 2. / 3.;
     Rect::new(w - 0.3, (row_h() - rh) / 2., INTERACT_WIDTH, rh)
+}
+
+/// 音符映射目标类型的显示名（设置页那 4 个循环按钮上写的字）。
+fn note_map_label(t: NoteMapTarget) -> Cow<'static, str> {
+    match t {
+        NoteMapTarget::Keep => tl!("note-map-keep"),
+        NoteMapTarget::Tap => tl!("note-map-tap"),
+        NoteMapTarget::Drag => tl!("note-map-drag"),
+        NoteMapTarget::Flick => tl!("note-map-flick"),
+        NoteMapTarget::Hold => tl!("note-map-hold"),
+    }
 }
 
 struct GeneralList {
@@ -1364,6 +1375,18 @@ struct ChartList {
     motion_threshold_slider: Slider,
     motion_still_slider: Slider,
 
+    // ---- 音符映射（把某一类音符整体改成另一类）----
+    /// 源：蓝键（Tap / Click）。
+    note_map_tap_btn: DRectButton,
+    /// 源：黄键（Drag）。
+    note_map_drag_btn: DRectButton,
+    /// 源：红键（Flick）。
+    note_map_flick_btn: DRectButton,
+    /// 源：长条（Hold）。
+    note_map_hold_btn: DRectButton,
+    /// 映射成「长条」时，新长条的时长（毫秒）。
+    note_map_hold_ms_slider: Slider,
+
     /// 上传成绩开关 + 查看协议
     upload_btn: DRectButton,
     upload_consent_btn: DRectButton,
@@ -1469,6 +1492,12 @@ impl ChartList {
             motion_btn: DRectButton::new(),
             motion_threshold_slider: Slider::new(Config::MOTION_THRESHOLD_MIN..Config::MOTION_THRESHOLD_MAX, 0.01),
             motion_still_slider: Slider::new(Config::MOTION_STILL_MIN..Config::MOTION_STILL_MAX, 0.1),
+
+            note_map_tap_btn: DRectButton::new(),
+            note_map_drag_btn: DRectButton::new(),
+            note_map_flick_btn: DRectButton::new(),
+            note_map_hold_btn: DRectButton::new(),
+            note_map_hold_ms_slider: Slider::new(Config::NOTE_MAP_HOLD_MS_MIN..Config::NOTE_MAP_HOLD_MS_MAX, 10.),
 
             upload_btn: DRectButton::new(),
             upload_consent_btn: DRectButton::new(),
@@ -1618,6 +1647,30 @@ impl ChartList {
             return Ok(wt);
         }
 
+        // 音符映射：四个按钮点一下循环「保持不变 → 蓝键 → 黄键 → 红键 → 长条」
+        if self.note_map_tap_btn.touch(touch, t) {
+            config.note_map.tap = config.note_map.tap.next();
+            return Ok(Some(true));
+        }
+        if self.note_map_drag_btn.touch(touch, t) {
+            config.note_map.drag = config.note_map.drag.next();
+            return Ok(Some(true));
+        }
+        if self.note_map_flick_btn.touch(touch, t) {
+            config.note_map.flick = config.note_map.flick.next();
+            return Ok(Some(true));
+        }
+        if self.note_map_hold_btn.touch(touch, t) {
+            config.note_map.hold = config.note_map.hold.next();
+            return Ok(Some(true));
+        }
+        if let wt @ Some(_) = self.note_map_hold_ms_slider.touch(touch, t, &mut config.note_map_hold_ms) {
+            config.note_map_hold_ms = config
+                .note_map_hold_ms
+                .clamp(Config::NOTE_MAP_HOLD_MS_MIN, Config::NOTE_MAP_HOLD_MS_MAX);
+            return Ok(wt);
+        }
+
         if self.upload_btn.touch(touch, t) {
             if config.upload_record {
                 // 已经开着：直接关掉
@@ -1714,6 +1767,33 @@ impl ChartList {
         item! {
             render_title(ui, tl!("item-flick-protect"), Some(tl!("item-flick-protect-sub")));
             render_switch(ui, rr, t, &mut self.flick_protect_btn, config.flick_protect);
+        }
+        // ---- 音符映射 ----
+        item! {
+            render_title(ui, tl!("item-note-map-tap"), Some(tl!("item-note-map-tap-sub")));
+            self.note_map_tap_btn.render_text(ui, rr, t, note_map_label(config.note_map.tap), 0.5, false);
+        }
+        item! {
+            render_title(ui, tl!("item-note-map-drag"), Some(tl!("item-note-map-drag-sub")));
+            self.note_map_drag_btn.render_text(ui, rr, t, note_map_label(config.note_map.drag), 0.5, false);
+        }
+        item! {
+            render_title(ui, tl!("item-note-map-flick"), Some(tl!("item-note-map-flick-sub")));
+            self.note_map_flick_btn.render_text(ui, rr, t, note_map_label(config.note_map.flick), 0.5, false);
+        }
+        item! {
+            render_title(ui, tl!("item-note-map-hold"), Some(tl!("item-note-map-hold-sub")));
+            self.note_map_hold_btn.render_text(ui, rr, t, note_map_label(config.note_map.hold), 0.5, false);
+        }
+        item! {
+            render_title(ui, tl!("item-note-map-hold-ms"), Some(tl!("item-note-map-hold-ms-sub")));
+            self.note_map_hold_ms_slider.render(
+                ui,
+                rr,
+                t,
+                config.note_map_hold_ms,
+                format!("{:.0}ms", config.note_map_hold_ms),
+            );
         }
         item! {
             render_title(ui, tl!("item-judge"), Some(tl!("item-judge-sub")));
@@ -2958,6 +3038,8 @@ fn apply_upload_profile_to(config: &mut Config) -> usize {
     config.late_leniency_ms = 0.;
     config.drag_protect = false;
     config.flick_protect = false;
+    // 音符映射改了谱面数据本身，上传配置里必须清掉（否则成绩和原谱面对不上）。
+    config.note_map = Default::default();
     // 下面两个是引擎判断「能否上传」的直接条件（见 prpr/src/scene/game.rs 里构造
     // record_data 那一段），之前一直漏着 —— 开了离线模式或键盘游玩时，就算 mod 全清、
     // 速度 1.0，照样不上传，而且只弹一句「不能上传」，极难排查。

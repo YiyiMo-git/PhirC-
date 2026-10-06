@@ -410,6 +410,10 @@ impl GameScene {
         }
 
         let (mut chart, chart_bytes, chart_format) = Self::load_chart(fs.deref_mut(), &info).await?;
+        // 音符映射（设置 → 谱面）：把某一类音符整体换成另一类（例如「所有红键 → 蓝键」）。
+        // 必须放在这里 —— 谱面已解析完、`Judge` 还没构造，这样判定 / 贴图 / 打击音效
+        // 会一起跟着变，而不是只换一张贴图。
+        chart.apply_note_map(&config.note_map, config.note_map_hold_secs());
         if config.mods.contains(Mods::NO_SHADER) {
             chart.extra.effects.clear();
             chart.extra.global_effects.clear();
@@ -1916,11 +1920,16 @@ impl Scene for GameScene {
                     // 设置里打开「上传成绩」后才会构造记录。条件与官方一致：
                     // 非离线模式、没有 UNRATED mod、不是键盘游玩、速度 ≥ 1.0。
                     // 这段原来在 `#[cfg(closed)]` 里，是开源构建传不了成绩的直接原因。
+                    // 另外「音符映射」（设置 → 谱面）动过谱面数据本身，判定结果和原谱面
+                    // 对不上，所以只要映射不是全「保持不变」就不上传。
+                    // ⚠️ 改这里必须同步 `phira/src/scene/song.rs` 的 `rated`，
+                    // 否则会出现「没提示不计入排行、但成绩其实没上传」。
                     let can_upload = self.upload_fn.is_some()
                         && !self.res.config.offline_mode
                         && !self.res.config.mods.intersects(Mods::UNRATED)
                         && !self.res.config.use_keyboard
-                        && self.res.config.speed >= 1.0 - 1e-3;
+                        && self.res.config.speed >= 1.0 - 1e-3
+                        && self.res.config.note_map.is_identity();
                     let record_data = match (can_upload, &self.player, &self.res.info.id) {
                         (true, Some(player), Some(chart)) => Some(crate::record::encode_record(
                             player.id,

@@ -908,6 +908,9 @@ impl SongScene {
                 && !eff_mods.intersects(Mods::UNRATED)
                 && !config.use_keyboard
                 && config.speed >= 1.0 - 1e-3
+                // 「音符映射」（设置 → 谱面）改过谱面数据 → 和引擎侧一样不上传。
+                // 两边的条件必须一致，否则这里会误判成"计入排行"→ 不弹提示，但成绩没上传。
+                && config.note_map.is_identity()
         };
         if !rated && can_rated && mode == GameMode::Normal {
             show_message(tl!("warn-unrated")).warn();

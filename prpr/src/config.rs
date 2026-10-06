@@ -135,6 +135,63 @@ impl HealthBarColor {
     }
 }
 
+/// 「音符映射」的目标类型：把某一类音符整体改成哪一类。
+///
+/// 术语按社区习惯：蓝键 = Tap（`Click`），黄键 = Drag，红键 = Flick，长条 = Hold。
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub enum NoteMapTarget {
+    /// 保持不变（默认）。
+    #[default]
+    Keep,
+    /// 蓝键（Tap / `Click`）。
+    Tap,
+    /// 黄键（Drag）。
+    Drag,
+    /// 红键（Flick）。
+    Flick,
+    /// 长条（Hold）；新长条的时长见 [`Config::note_map_hold_ms`]。
+    Hold,
+}
+
+impl NoteMapTarget {
+    /// 可选值顺序（设置页点一下换下一个）。
+    pub const ALL: [Self; 5] = [Self::Keep, Self::Tap, Self::Drag, Self::Flick, Self::Hold];
+
+    /// 下一个目标类型（循环）。
+    pub fn next(self) -> Self {
+        let idx = Self::ALL.iter().position(|it| *it == self).unwrap_or(0);
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+}
+
+/// 音符映射表：四类源音符各自被改成哪一类目标音符。
+///
+/// 例如「所有红键改成蓝键」= `flick: NoteMapTarget::Tap`，其余保持默认。
+/// 默认全 [`NoteMapTarget::Keep`] = 完全不改谱面。
+#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteMap {
+    /// 源：蓝键（Tap / `Click`）。
+    pub tap: NoteMapTarget,
+    /// 源：黄键（Drag）。
+    pub drag: NoteMapTarget,
+    /// 源：红键（Flick）。
+    pub flick: NoteMapTarget,
+    /// 源：长条（Hold）。
+    pub hold: NoteMapTarget,
+}
+
+impl NoteMap {
+    /// 是否完全没有改动（四项都是 `Keep`）。
+    ///
+    /// 为真时整条映射链路（遍历全谱音符 + 重建判定线缓存）可以直接跳过。
+    #[inline]
+    pub fn is_identity(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 /// 判定文字（PERFECT / GOOD / BAD / MISS）的出现动画样式。
 #[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -489,6 +546,13 @@ pub struct Config {
     /// 只影响观感：不改谱面时间、不改音频播放、不改判定窗口。从 PhiraiAd 移植。
     pub note_flow_speed: f32,
     pub note_scale: f32,
+    /// 音符映射：把某一类音符整体改成另一类（例如「所有红键 → 蓝键」）。
+    ///
+    /// 改的是**谱面数据本身** —— 判定、贴图、打击音效一起跟着变，不是只换贴图。
+    /// 在 `Game::new` 里谱面解析完成之后、`Judge` 构造之前应用。
+    pub note_map: NoteMap,
+    /// 音符映射里「变成**长条**」时，新长条的时长（毫秒）。
+    pub note_map_hold_ms: f32,
     /// 结算画面是否画判定时间分布图（Early / Late 直方图）。
     pub ending_judge_chart: bool,
     /// 游戏内是否实时提示「太早 / 太晚」。
@@ -701,6 +765,8 @@ impl Default for Config {
             mp_enabled: false,
             note_flow_speed: 1.0,
             note_scale: 1.0,
+            note_map: NoteMap::default(),
+            note_map_hold_ms: Self::NOTE_MAP_HOLD_MS_DEFAULT,
             ending_judge_chart: false,
             early_late_hint: false,
             pause_offset_adjust: false,
@@ -944,6 +1010,24 @@ impl Config {
     pub const HEALTH_BAR_LEN_MAX: f32 = 1.;
     /// 血量条长度下限。
     pub const HEALTH_BAR_LEN_MIN: f32 = 0.2;
+
+    /// 音符映射「变成长条」时的时长下限（毫秒）。
+    pub const NOTE_MAP_HOLD_MS_MIN: f32 = 30.;
+    /// 音符映射「变成长条」时的时长上限（毫秒）。
+    pub const NOTE_MAP_HOLD_MS_MAX: f32 = 2000.;
+    /// 音符映射「变成长条」时的默认时长（毫秒）。
+    pub const NOTE_MAP_HOLD_MS_DEFAULT: f32 = 200.;
+
+    /// 音符映射「变成长条」的时长（秒），限制在可配置范围内。
+    #[inline]
+    pub fn note_map_hold_secs(&self) -> f64 {
+        let ms = if self.note_map_hold_ms.is_finite() {
+            self.note_map_hold_ms.clamp(Self::NOTE_MAP_HOLD_MS_MIN, Self::NOTE_MAP_HOLD_MS_MAX)
+        } else {
+            Self::NOTE_MAP_HOLD_MS_DEFAULT
+        };
+        ms as f64 / 1000.
+    }
 
     /// 陀螺仪视差幅度的上下限。
     pub const GYRO_SCALE_MIN: f32 = 0.;
