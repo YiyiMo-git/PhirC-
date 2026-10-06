@@ -34,7 +34,7 @@ pub(crate) use blockarea::BlockAudio;
 pub(crate) use blockarea::reset_block_effects;
 pub use blockarea::{draw_disabled_zones, draw_zones, draw_zones_with_touches, Zone};
 /// 噪区遮罩分辨率（设置滑块 / 存档加载用）。
-pub use blockarea::{mask_divisor, set_mask_divisor};
+pub use blockarea::{mask_divisor, set_mask_divisor, MAX_MASK_DIVISOR, MIN_MASK_DIVISOR};
 /// 噪区着色器的编译错误（`None` = 编译成功）。给「设置 → 日志」页显示。
 pub use blockarea::{block_shader_error, force_block_shader_init};
 

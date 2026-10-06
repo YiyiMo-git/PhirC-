@@ -39,6 +39,18 @@ pub(super) struct Masks {
 /// 数值越小格子越细、溶解边与外侧辉光的台阶越精细，但逐像素开销与除数² 成反比。
 const DEFAULT_MASK_DIVISOR: usize = 4;
 
+/// 允许的范围。**两头都有硬理由**，不要随手放宽：
+///
+/// * **上限 8** = 官方原生分辨率。比 8 更大只会更粗：除数 32 时掩码只剩
+///   `width/32` 格（1080p 下约 60×34），噪区**完全没有边缘**，等于把这个功能关掉
+///   （用户实测反馈过）。
+/// * **下限 2**：除数 1 会让掩码变成 `2×视口`（`ew = width/1*2`）。1080p 下
+///   `rgba` + `aux_rgba` 各 33 MB ⇒ **每帧 66 MB 纹理 + 66 MB 上传**，手机
+///   （2400×1080）到 83 MB/帧，极易 OOM / 卡成幻灯片。2 是还能接受的最细一档。
+pub const MIN_MASK_DIVISOR: usize = 2;
+/// 见 [`MIN_MASK_DIVISOR`] 的说明。
+pub const MAX_MASK_DIVISOR: usize = 8;
+
 /// 当前生效的除数。用原子量而不是 `Config` 直接读 —— `render_displaced` 在渲染热路径上，
 /// 不希望为此去加锁或把配置穿透到 `Resource`。
 static MASK_DIVISOR: AtomicUsize = AtomicUsize::new(DEFAULT_MASK_DIVISOR);
@@ -47,7 +59,7 @@ static MASK_DIVISOR: AtomicUsize = AtomicUsize::new(DEFAULT_MASK_DIVISOR);
 ///
 /// 夹在 `1..=32`：0 会让掩码退化成 1 格，过大则噪区几乎看不见。
 pub fn set_mask_divisor(divisor: usize) {
-    MASK_DIVISOR.store(divisor.clamp(1, 32), Ordering::Relaxed);
+    MASK_DIVISOR.store(divisor.clamp(MIN_MASK_DIVISOR, MAX_MASK_DIVISOR), Ordering::Relaxed);
 }
 
 /// 当前遮罩分辨率除数（见 [`set_mask_divisor`]）。
@@ -556,5 +568,24 @@ mod tests {
         assert_eq!(mask.sources_rgba[3], 26);
         assert_eq!(mask.raw_disabled_green[0], 6);
         assert_eq!(mask.rgba[3], 120);
+    }
+}
+
+#[cfg(test)]
+mod divisor_clamp_tests {
+    use super::*;
+
+    #[test]
+    fn clamps_to_sane_range() {
+        // 越界值必须被夹回合法区间：存档里若存着 32（旧版本 / 手改），
+        // 不能让它原样生效 —— 那会让噪区完全没有边缘。
+        set_mask_divisor(0);
+        assert_eq!(mask_divisor(), MIN_MASK_DIVISOR);
+        set_mask_divisor(32);
+        assert_eq!(mask_divisor(), MAX_MASK_DIVISOR);
+        set_mask_divisor(4);
+        assert_eq!(mask_divisor(), 4);
+        // 默认值必须落在范围内
+        assert!((MIN_MASK_DIVISOR..=MAX_MASK_DIVISOR).contains(&DEFAULT_MASK_DIVISOR));
     }
 }

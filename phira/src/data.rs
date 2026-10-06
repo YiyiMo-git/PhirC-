@@ -363,6 +363,13 @@ impl Data {
 
         self.config.init();
         // 把持久化的噪区精细度应用给引擎（`blockarea` 用原子量，热路径不加锁）。
+        // 夹进合法范围：旧版本 / 手改过的 data.json 里可能存着 32 ——
+        // 只夹「应用值」不够，配置本身不夹的话**滑块标签仍会显示 32**，
+        // 而滑块实际范围是 2~8，位置和数字对不上。
+        self.config.block_mask_divisor = self
+            .config
+            .block_mask_divisor
+            .clamp(prpr::core::MIN_MASK_DIVISOR, prpr::core::MAX_MASK_DIVISOR);
         prpr::core::set_mask_divisor(self.config.block_mask_divisor);
         PREFER_REDUCED_MOTION.store(self.prefer_reduced_motion, Ordering::Relaxed);
         Ok(())

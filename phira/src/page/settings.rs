@@ -1486,7 +1486,12 @@ impl ChartList {
             judge_chart_btn: DRectButton::new(),
             health_max_btn: DRectButton::new(),
             health_scale_slider: Slider::new(0.1..5., 0.1),
-            block_mask_slider: Slider::new(1.0..8.0, 1.0),
+            block_mask_slider: Slider::new(
+                // `Slider::new` 收的是**排他**范围 `Range<f32>`；滑块右端 p=1 时
+                // 算出的值正好等于 MAX，所以这里写 `MIN..MAX` 而不是 `..=MAX`。
+                prpr::core::MIN_MASK_DIVISOR as f32..prpr::core::MAX_MASK_DIVISOR as f32,
+                1.0,
+            ),
             health_color_btn: DRectButton::new(),
             health_len_slider: Slider::new(Config::HEALTH_BAR_LEN_MIN..Config::HEALTH_BAR_LEN_MAX, 0.05),
             motion_btn: DRectButton::new(),
@@ -1618,7 +1623,8 @@ impl ChartList {
         // 噪区精细度：改完立刻生效（`render_displaced` 每帧读原子量，无需重启）。
         let mut block_mask_divisor = config.block_mask_divisor as f32;
         if let wt @ Some(_) = self.block_mask_slider.touch(touch, t, &mut block_mask_divisor) {
-            config.block_mask_divisor = block_mask_divisor.round().clamp(1., 8.) as usize;
+            config.block_mask_divisor = (block_mask_divisor.round() as usize)
+                .clamp(prpr::core::MIN_MASK_DIVISOR, prpr::core::MAX_MASK_DIVISOR);
             prpr::core::set_mask_divisor(config.block_mask_divisor);
             return Ok(wt);
         }

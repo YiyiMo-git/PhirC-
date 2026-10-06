@@ -145,7 +145,7 @@ item-health-max = Health Maximum
 item-health-max-sub = Maximum health of health mode (10 ~ 10000, 100 by default; you start at 70%)
 # 噪区精细度滑块（prpr blockarea 的 MASK_DIVISOR）
 item-block-mask-divisor = Noise zone detail
-item-block-mask-divisor-sub = Smaller = finer cells and sharper edges; 1 is finest, 8 is cheapest
+item-block-mask-divisor-sub = Mask resolution divisor (2-8). Smaller = finer cells and sharper edges, but per-pixel cost grows with the square; 8 is the official native resolution
 
 item-health-scale = Health Strength
 item-health-scale-sub = Heal / damage multiplier of health mode (1.0x by default: Perfect +1, Good +0.5, Bad -5, Miss -10)

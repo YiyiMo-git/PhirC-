@@ -150,4 +150,4 @@ item-gyro-scale-sub = 透視視差跟隨的強度
 
 # 噪区精细度滑块（prpr blockarea 的 MASK_DIVISOR）
 item-block-mask-divisor = 噪區精細度
-item-block-mask-divisor-sub = 數值越小格子越細、邊緣越精細；1 最細，8 最省效能
+item-block-mask-divisor-sub = 遮罩解析度除數（2 ~ 8）。數值越小格子越細、邊緣越精細，但逐像素開銷按平方增長；8 是官方原生解析度
