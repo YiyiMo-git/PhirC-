@@ -36,6 +36,8 @@ mod threed;
 mod ui;
 mod uml;
 mod webui;
+/// 开始页 5 个按钮的**原生触摸命中**（绕开 JS 注入；iOS 上启用，见 `webui_hit::ENABLED`）。
+mod webui_hit;
 /// 开始页内嵌资源表（跨平台共用；Windows 走自定义协议、Android 走 Java 内存表）。
 #[cfg(feature = "webui")]
 mod webui_assets;

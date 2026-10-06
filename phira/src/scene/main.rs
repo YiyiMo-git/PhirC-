@@ -366,6 +366,39 @@ impl Scene for MainScene {
         if prpr::scene::has_pending_input() {
             return Ok(true);
         }
+
+        // 【开始页（WebView）可见时，触摸全部由 Rust 侧裁决】
+        //
+        // 背景：iOS 上 WKWebView 的 JS 注入怎么都不生效，5 个按钮点了没反应。
+        // 解决方式见 `crate::webui_hit` —— `ios/webui.m` 把 WKWebView 设成
+        // `userInteractionEnabled = NO`，触摸穿透到下面的游戏视图，这里按矩形命中。
+        //
+        // 注意「**没命中也要吃掉**」：WebView 已经不再拦截任何触摸了，如果这里放行，
+        // 触摸会穿透到 WebView 下面那层**看不见的** Rust 首页 / New UI 外壳
+        // （`render` 在 WebView 可见时是整帧跳过的），点屏幕顶部就能盲切活动栏。
+        // 现在这样正好还原「WebView 铺在上面时它吃掉一切触摸」的旧语义，
+        // 只是把落在 5 个按钮上的那几次翻译成原生动作。
+        //
+        // `ENABLED` 只在 iOS 为 true（原因写在它的文档注释里：Windows 会双击、
+        // Android 触摸根本到不了游戏视图），非 iOS 平台这个分支永不进入 ——
+        // 但仍会被编译，所以 `cargo check` 就能验证 iOS 那条路。
+        if crate::webui_hit::ENABLED && crate::webui::is_webui_visible() {
+            // 只在按下的那一刻判定一次（`TouchPhase::Started` 每个手指只产生一次），
+            // 不需要像 `RectButton` 那样跟踪 id / 抬手位置：菜单按钮按下即生效，
+            // 手指划走取消反而更让人困惑。
+            if matches!(touch.phase, TouchPhase::Started) {
+                // 只有「开始页」这一个界面才有这 5 个按钮。`current_page()` 由 JS 的
+                // `ui_page_changed` 上报；开始页 `ui/index.html` 没有引 bridge.js，
+                // 永远不上报，所以实际取值是空串（`"home"` 也一并放行，以防将来接上）。
+                if matches!(crate::webui::current_page().as_str(), "" | "home") {
+                    let pos = (touch.position.x, touch.position.y);
+                    let screen = (screen_width(), screen_height());
+                    crate::webui_hit::handle_touch(pos, screen);
+                }
+            }
+            return Ok(true);
+        }
+
         if self.state.fader.transiting() {
             return Ok(false);
         }

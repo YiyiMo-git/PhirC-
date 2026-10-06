@@ -174,6 +174,25 @@ void phira_webui_create(const char *html, const char *init_js, phira_webui_ipc_f
         wv.backgroundColor = UIColor.clearColor;
         wv.hidden = YES;
         wv.navigationDelegate = gHandler;
+
+        // 【关键】关掉 WebView 的交互 —— 让触摸**穿透到下面的游戏视图**。
+        //
+        // 为什么：iOS 上这个 WKWebView 的 JS 注入怎么都不生效（`WKUserScript` 和
+        // `didFinishNavigation` 里再 `evaluateJavaScript` 都试过），`index.html` 里
+        // 5 个按钮的 `addEventListener` 永远绑不上，点了完全没有反应。
+        //
+        // 我们改成不依赖 JS：`userInteractionEnabled = NO` 之后，
+        // `hitTest:withEvent:` 对本视图返回 nil，触摸落到它下面那一层 ——
+        // 也就是 miniquad 的 `QuadView`（本 WebView 就是 `addSubview` 到 root.view
+        // 上的，而 root.view 正是 `QuadView`，见 `phira_root_view_controller`：
+        // miniquad 把 `QuadView` 设成了 window 的 rootViewController.view）。
+        // 游戏线程照常收到触摸，Rust 侧用矩形命中按钮 —— 见
+        // `phira/src/webui_hit.rs` 与 `MainScene::touch`。
+        //
+        // 代价：页面自己的交互（双击左侧曲绘换图、文件选择）一并没有了。
+        // 那本来就是页面自带的小功能，换「5 个按钮至少能用」完全值得。
+        wv.userInteractionEnabled = NO;
+
         [cfg release];
 
         [root.view addSubview:wv];

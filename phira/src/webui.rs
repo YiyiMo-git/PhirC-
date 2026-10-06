@@ -486,6 +486,71 @@ async fn dispatch(cmd: &str, args: Value) -> Result<Value> {
     }
 }
 
+/* ======================= 开始页按钮 → 动作（原生命中共用） ======================= */
+
+/// 开始页 5 个按钮的 id，顺序与 `ui/index.html` 的 DOM 顺序一致。
+///
+/// * JS 侧：`START_PAGE_INIT_SCRIPT` 的 `HANDLERS`（注入脚本用）；
+/// * Rust 侧：[`button_command`] 的动作表 + [`crate::webui_hit::hit`] 的矩形表（iOS 原生触摸命中用）。
+///
+/// 三处必须描述同一批按钮，靠单元测试焊死
+/// （`js_handlers_match_rust_button_table` / `button_ids_match_the_shared_table`）。
+pub const START_PAGE_BUTTON_IDS: [&str; 5] = ["btn-start", "btn-res", "btn-settings", "btn-activity", "btn-last"];
+
+/// 按钮 id → `(IPC 命令, 参数)`。
+///
+/// **与 `START_PAGE_INIT_SCRIPT` 的 `HANDLERS` 一一对应**（有测试盯着）：
+///
+/// | 按钮 | 命令 | 参数 |
+/// |---|---|---|
+/// | `#btn-start` 开始游玩 | `open_rust_page` | `{page:"library"}`（原生曲库） |
+/// | `#btn-res` 资源包 | `open_rust_page` | `{page:"respack"}` |
+/// | `#btn-settings` 设置 | `open_rust_page` | `{page:"settings"}` |
+/// | `#btn-activity` 活动 | `open_rust_page` | `{page:"event"}` |
+/// | `#btn-last` 上次游玩 | `start_last_chart` | `{}` |
+pub fn button_command(btn: &str) -> Option<(&'static str, Value)> {
+    let (cmd, args) = match btn {
+        "btn-start" => ("open_rust_page", json!({ "page": "library" })),
+        "btn-res" => ("open_rust_page", json!({ "page": "respack" })),
+        "btn-settings" => ("open_rust_page", json!({ "page": "settings" })),
+        "btn-activity" => ("open_rust_page", json!({ "page": "event" })),
+        "btn-last" => ("start_last_chart", json!({})),
+        _ => return None,
+    };
+    Some((cmd, args))
+}
+
+/// 由**原生触摸命中**（iOS，见 [`crate::webui_hit`]）直接触发开始页按钮动作。
+///
+/// 走的是与 JS 侧 `window.__PHIRA__.invoke(...)` **完全相同**的一条路：
+/// 按 [`button_command`] 拼出 `{ id, cmd, args }` 交给 [`handle_ipc`] ——
+/// 消息解析、异步运行时驱动、`open_rust_page` / `start_last_chart` 的实现
+/// 全部复用，这里**没有**第二份动作分发逻辑。
+///
+/// `id` 用 0：原生侧没有 Promise 要配对，只需要一个能过 `handle_ipc` 的占位。
+///
+/// 返回 `true` 表示按钮已知、命令已派发（命令自身的成功 / 失败只写诊断日志，
+/// 因为原生路径没有 JS 回调可以接收错误）。
+pub fn invoke_button_action(btn: &str) -> bool {
+    let Some((cmd, args)) = button_command(btn) else {
+        diag(&format!("原生触摸命中了未知按钮 {btn}，已忽略"));
+        return false;
+    };
+    // 这一行是手机上排查「按钮到底有没有被 Rust 收到」的唯一线索（设置 → 日志里能看）。
+    diag(&format!("原生触摸命中 {btn} → {cmd} {args}"));
+    let Some(resp) = handle_ipc(&json!({ "id": 0, "cmd": cmd, "args": args }).to_string()) else {
+        diag(&format!("按钮 {btn} 的 IPC 消息未能解析"));
+        return true;
+    };
+    // 原生路径没有 JS 的 Promise 去接错误，只能记日志，不然失败是「静默」的。
+    if let Ok(value) = serde_json::from_str::<Value>(&resp) {
+        if let Some(err) = value.get("error").and_then(Value::as_str) {
+            diag(&format!("按钮 {btn} 执行失败：{err}"));
+        }
+    }
+    true
+}
+
 /* ---------------------------- 各命令实现 ---------------------------- */
 
 async fn get_me() -> Result<Value> {
@@ -1109,3 +1174,84 @@ pub const START_PAGE_INIT_SCRIPT: &str = r#"
   start();
 })();
 "#;
+
+/* ============================ 测试 ============================ */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 从 `START_PAGE_INIT_SCRIPT` 里把 `HANDLERS` 表抠出来，解析成
+    /// `(按钮 id, 命令, page 参数)` 三元组。
+    ///
+    /// 解析对象就是注入脚本里那 5 行 `'btn-x': function () { return invoke('cmd', { page: 'y' }); },`
+    /// （`btn-last` 没有参数）。任何格式变动都会在这里炸出来 —— 这正是目的。
+    fn js_handlers() -> Vec<(String, String, String)> {
+        let script = START_PAGE_INIT_SCRIPT;
+        let start = script.find("var HANDLERS = {").expect("START_PAGE_INIT_SCRIPT 里找不到 HANDLERS 表");
+        let end = start + script[start..].find("};").expect("HANDLERS 表没有闭合的 };");
+        let block = &script[start..end];
+
+        let mut out = Vec::new();
+        for line in block.lines() {
+            let Some(rest) = line.trim().strip_prefix('\'') else { continue };
+            let Some((id, rest)) = rest.split_once('\'') else { continue };
+            let Some((_, rest)) = rest.split_once("invoke('") else { continue };
+            let Some((cmd, rest)) = rest.split_once('\'') else { continue };
+            let arg = rest
+                .split_once("page: '")
+                .and_then(|(_, it)| it.split_once('\''))
+                .map(|(v, _)| v.to_owned())
+                .unwrap_or_default();
+            out.push((id.to_owned(), cmd.to_owned(), arg));
+        }
+        out.sort();
+        out
+    }
+
+    fn rust_handlers() -> Vec<(String, String, String)> {
+        let mut out: Vec<_> = START_PAGE_BUTTON_IDS
+            .iter()
+            .map(|id| {
+                let (cmd, args) = button_command(id).unwrap_or_else(|| panic!("Rust 动作表里缺 {id}"));
+                let page = args.get("page").and_then(Value::as_str).unwrap_or("").to_owned();
+                ((*id).to_owned(), cmd.to_owned(), page)
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// 注入脚本（JS）与 [`button_command`]（Rust 原生命中）描述的动作必须完全一致。
+    ///
+    /// 这两张表一旦漂移，就会出现「iOS 上点『设置』开了资源包」这类最难查的错，
+    /// 所以用测试把它们焊在一起，而不是靠注释提醒。
+    #[test]
+    fn js_handlers_match_rust_button_table() {
+        let js = js_handlers();
+        assert_eq!(js.len(), 5, "HANDLERS 应该正好 5 个按钮，解析到：{js:?}");
+        assert_eq!(js, rust_handlers(), "注入脚本的 HANDLERS 与 Rust 的 button_command 漂移了");
+    }
+
+    /// 每个按钮都必须能在动作表里查到，且未知 id 要干净地返回 `None`。
+    #[test]
+    fn button_command_covers_every_button_id() {
+        for id in START_PAGE_BUTTON_IDS {
+            let (cmd, args) = button_command(id).unwrap_or_else(|| panic!("{id} 没有对应命令"));
+            assert!(!cmd.is_empty());
+            if cmd == "open_rust_page" {
+                assert!(
+                    matches!(
+                        args.get("page").and_then(Value::as_str),
+                        Some("library" | "respack" | "settings" | "event")
+                    ),
+                    "{id} 的 page 参数不合法：{args}"
+                );
+            } else {
+                assert_eq!(cmd, "start_last_chart");
+            }
+        }
+        assert!(button_command("btn-nope").is_none());
+        assert!(button_command("").is_none());
+    }
+}
