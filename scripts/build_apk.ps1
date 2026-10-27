@@ -174,14 +174,16 @@ if (Test-Path $kaichangSrc) {
     $kaichangDst = Join-Path $assetsDst 'kaichang'
     New-Item $kaichangDst -ItemType Directory -Force | Out-Null
     $pages = @('index.html','tripsUide.html','tools.html','Setting.html','ResPack.html',
-               'library.html','Replays.html','ChartPanel.html')
+               'library.html','Replays.html','ChartPanel.html',
+               # 制谱器 / 成长树 / MOD 管理：曲库顶部按钮会直接跳这些页面，漏拷就是 404
+               'ChartEditor.html','Growth.html','Mod.html')
     foreach ($f in $pages) {
         $src = Join-Path $kaichangSrc $f
         if (Test-Path $src) { Copy-Item $src (Join-Path $kaichangDst $f) -Force }
         else { Write-Host "  (跳过缺失页面 $f)" }
     }
     # 页面用到的贴图/字体/图标（按需列白名单，避免把整个 kaichang 塞进去）
-    foreach ($f in 'cmdysj.ttf','背景.png','Rubbish Sorting.png','导航栏.png','phirc.png',
+    foreach ($f in 'cmdysj.ttf','qrcode.js','背景.png','Rubbish Sorting.png','导航栏.png','phirc.png',
                    '左上角1.png','左上角2.png','左上角3.png','右下角1.png','右下角2.png','右下角3.png',
                    '收集品icon.png','JoinQQGuildBanner.png','setting.png','beijing.jpeg','TriGridBase.png',
                    '3.jpg','play.png','sort.png','Random.png','Introduction.png','lock.png') {
@@ -232,5 +234,8 @@ python (Join-Path $PSScriptRoot 'fix_apk_names.py') $apk.FullName $bt.FullName $
 if ($LASTEXITCODE -ne 0) { throw "APK zip 条目名修复失败（exit $LASTEXITCODE）" }
 
 Write-Host "[done] APK: $($apk.FullName)  ($([math]::Round($apk.Length/1MB, 1)) MB)"
+# 显式 0：脚本里调用过 cargo/gradle/python，$LASTEXITCODE 可能残留非 0，
+# 会让外层调用方误判构建失败（构建成功却返回 1）。
+exit 0
 
 
