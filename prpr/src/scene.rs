@@ -442,8 +442,39 @@ pub fn request_file(id: impl Into<String>) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// WebView 侧（制谱器选音乐/曲绘）预留的文件 id。
+///
+/// 游戏各场景每帧都在轮询 [`take_file`]，会把选中的文件抢走并当未知 id 丢弃；
+/// 预留后场景侧见到该 id 直接跳过，只有 [`take_file_reserved`] 能取走。
+static RESERVED_FILE_ID: Mutex<Option<String>> = Mutex::new(None);
+
+pub fn reserve_file_id(id: &str) {
+    *RESERVED_FILE_ID.lock().unwrap() = Some(id.to_owned());
+}
+
+pub fn take_file_reserved(id: &str) -> Option<(String, String)> {
+    let mut w = CHOSEN_FILE.lock().unwrap();
+    let got = w.0.clone().zip(w.1.take());
+    match got {
+        Some((got_id, file)) if got_id == id => {
+            *RESERVED_FILE_ID.lock().unwrap() = None;
+            Some((got_id, file))
+        }
+        Some(other) => {
+            *w = (Some(other.0), Some(other.1));
+            None
+        }
+        None => None,
+    }
+}
+
 pub fn take_file() -> Option<(String, String)> {
     let mut w = CHOSEN_FILE.lock().unwrap();
+    if let Some(reserved) = RESERVED_FILE_ID.lock().unwrap().as_deref() {
+        if w.0.as_deref() == Some(reserved) {
+            return None; // 留给 WebView 侧（制谱器选素材）
+        }
+    }
     w.0.clone().zip(std::mem::take(&mut w.1))
 }
 

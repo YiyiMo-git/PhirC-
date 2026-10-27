@@ -1457,7 +1457,6 @@ fn serve_respack(path: &str) -> Option<(Vec<u8>, &'static str)> {
 }
 
 /// 极简百分号解码（中文文件名如 `默认.png` 必须走这一步）。
-#[cfg(any(target_os = "windows", target_os = "ios"))]
 fn percent_decode(s: &str) -> Option<String> {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
@@ -1485,7 +1484,6 @@ fn percent_decode(s: &str) -> Option<String> {
 /// ES module 的同源检查会直接拦掉模块加载 —— 而 rpe-next 是纯 ES module 应用
 /// （`<script type="module">` + 上百个 `.mjs`）。只有 http 来源能跑，所以这里
 /// 起一个只监听 `127.0.0.1` 的极简静态服务，根目录就是 `kaichang/`。
-#[cfg(any(target_os = "windows", target_os = "ios"))]
 pub fn static_port() -> u16 {
     static PORT: OnceLock<u16> = OnceLock::new();
     *PORT.get_or_init(|| {
@@ -1518,8 +1516,25 @@ pub fn static_port() -> u16 {
     })
 }
 
-/// 单连接：只支持 GET，按 `kaichang/` 根目录读文件（挡 `..` 越界）。
-#[cfg(any(target_os = "windows", target_os = "ios"))]
+/// 安卓静态根：`WebViewHost` 启动时把 `assets/kaichang/rpe-next` 解压到
+/// `filesDir`，再通过 [`webview_set_static_root`] 告诉 Rust（APK 里的 assets
+/// 不是普通文件，静态服务读不到，必须先落地）。
+#[cfg(target_os = "android")]
+static ANDROID_STATIC_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// 静态服务根目录：桌面/iOS = `kaichang/`；安卓 = Java 解压出来的目录。
+fn static_root() -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        return ANDROID_STATIC_ROOT.lock().ok().and_then(|g| g.clone());
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        web_root()
+    }
+}
+
+/// 单连接：只支持 GET，按静态根目录读文件（挡 `..` 越界）。
 fn serve_static_conn(mut stream: std::net::TcpStream) -> std::io::Result<()> {
     use std::io::Read;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
@@ -1536,7 +1551,7 @@ fn serve_static_conn(mut stream: std::net::TcpStream) -> std::io::Result<()> {
         let path = raw.split('?').next().unwrap_or("/");
         let decoded = percent_decode(path).unwrap_or_else(|| path.to_owned());
         let rel = decoded.trim_start_matches('/');
-        if let Some(root) = web_root() {
+        if let Some(root) = static_root() {
             let full = root.join(rel);
             let inside = match (full.canonicalize(), root.canonicalize()) {
                 (Ok(f), Ok(r)) => f.starts_with(&r),
@@ -1605,7 +1620,6 @@ mod static_server_tests {
 }
 
 /// 按扩展名给 MIME。
-#[cfg(any(target_os = "windows", target_os = "ios"))]
 fn mime_of(path: &str) -> &'static str {
     let lower = path.to_ascii_lowercase();
     let ext = lower.rsplit('.').next().unwrap_or("");
@@ -1933,7 +1947,9 @@ fn handle_ipc(body: &str, tx: &mpsc::Sender<WebCmd>) {
             std::thread::spawn(move || {
                 #[cfg(target_os = "windows")]
                 let picked = pick_asset_with_parent(&kind);
-                #[cfg(not(target_os = "windows"))]
+                #[cfg(target_os = "android")]
+                let picked = pick_asset_android(&kind);
+                #[cfg(all(not(target_os = "windows"), not(target_os = "android")))]
                 let picked = crate::editor::pick_asset_file(&kind);
                 tracing::info!("[editor] pick_asset_file({kind}) 结果：{}", picked.as_deref().unwrap_or("取消/无"));
                 match picked {
@@ -2033,24 +2049,16 @@ fn handle_ipc(body: &str, tx: &mpsc::Sender<WebCmd>) {
         // 打开照搬的 rpe-next 编辑器（本地 http 静态服务，见 static_port 的注释）
         "open_rpen" => {
             let dir = req.get("args").and_then(|a| a.get("path")).and_then(|v| v.as_str()).unwrap_or("").to_owned();
-            #[cfg(any(target_os = "windows", target_os = "ios"))]
-            {
-                let port = static_port();
-                if port == 0 {
-                    reply(json!({ "ok": false, "error": "静态服务启动失败（见 phira-crash.log）" }));
-                    return;
-                }
-                let q = urlencode(&dir);
-                reply(json!({ "ok": true, "port": port }));
-                let _ = tx.send(WebCmd::Navigate(format!(
-                    "http://127.0.0.1:{port}/rpe-next/index.html?phirc_path={q}"
-                )));
+            let port = static_port();
+            if port == 0 {
+                reply(json!({ "ok": false, "error": "静态服务启动失败（见 phira-crash.log）" }));
+                return;
             }
-            #[cfg(not(any(target_os = "windows", target_os = "ios")))]
-            {
-                let _ = dir;
-                reply(json!({ "ok": false, "error": "当前平台暂不支持 RPEN 页面" }));
-            }
+            let q = urlencode(&dir);
+            reply(json!({ "ok": true, "port": port }));
+            let _ = tx.send(WebCmd::Navigate(format!(
+                "http://127.0.0.1:{port}/rpe-next/index.html?phirc_path={q}"
+            )));
         }
         // 从 rpe-next 返回制谱器（跨协议跳转只能由 Rust 侧 Navigate 发起）
         "back_to_editor" => {
@@ -4217,6 +4225,30 @@ pub fn pick_asset_with_parent(kind: &str) -> Option<String> {
     dlg.pick_file().map(|it| it.display().to_string())
 }
 
+/// 安卓：借用游戏自带的系统文件选择器（`prpr::scene::request_file`）。
+///
+/// 关键点：游戏各场景每帧都在 `take_file()`，会把选中的文件抢走并丢弃，
+/// 所以先 [`reserve_file_id`] 占位 —— 场景侧 `take_file` 见到预留 id 会直接跳过，
+/// 只有这里的 [`take_file_reserved`] 能取。
+#[cfg(target_os = "android")]
+fn pick_asset_android(kind: &str) -> Option<String> {
+    let id = format!("phirc_asset_{kind}");
+    prpr::scene::reserve_file_id(&id);
+    prpr::scene::request_file(id.clone());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while std::time::Instant::now() < deadline {
+        if let Some((got, file)) = prpr::scene::take_file_reserved(&id) {
+            // Java 侧取消时回传空串：立刻结束，别等满 180 秒
+            if file.is_empty() {
+                return None;
+            }
+            return Some(file);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+    None
+}
+
 // `HWND SetFocus(HWND)` —— 参数/返回值都是 `HWND`，Rust 侧用 `isize`（ABI 一致）。
 #[cfg(target_os = "windows")]
 unsafe extern "system" {
@@ -4676,6 +4708,17 @@ extern "system" fn webview_ipc(mut env: EnvUnowned, _: JClass, json: JString) {
     let Some(h) = HOST.get() else { return };
     let tx = h.cmd_tx.clone();
     std::thread::spawn(move || handle_ipc(&body, &tx));
+}
+
+/// Java 把 `assets/kaichang/rpe-next` 解压到 filesDir 后调用：设置静态服务根。
+#[cfg(target_os = "android")]
+#[export_name = "Java_org_flos_phira_modded_WebViewHost_nativeSetStaticRoot"]
+extern "system" fn webview_set_static_root(mut env: EnvUnowned, _: JClass, path: JString) {
+    let Some(p) = crate::read_java_string(&mut env, &path, "static root") else { return };
+    if let Ok(mut g) = ANDROID_STATIC_ROOT.lock() {
+        *g = Some(PathBuf::from(&p));
+    }
+    crate::diag(&format!("[webui] 安卓 RPEN 静态根：{p}"));
 }
 
 /// 页面加载完成（Java `onPageStarted` / `onPageFinished` 都会调，幂等）：

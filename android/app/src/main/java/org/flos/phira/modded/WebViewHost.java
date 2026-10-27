@@ -17,7 +17,10 @@ import android.webkit.ConsoleMessage;
 import android.widget.FrameLayout;
 
 import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -45,6 +48,58 @@ public class WebViewHost {
     private static native void nativeRegisterHost(WebViewHost host);
     private static native void nativeIpc(String json);
     private static native void nativeReady();
+    /** 告诉 Rust 静态服务的根目录（RPEN 页面要跑在 http://127.0.0.1 上，资源必须先落地）。 */
+    private static native void nativeSetStaticRoot(String path);
+
+    // ---- RPEN 资源落地（assets → filesDir，带版本号缓存） ----
+    private static final int RPE_ASSET_VERSION = 1;
+
+    private void ensureRpeNextAssets(Activity act) {
+        Thread t = new Thread(() -> {
+            try {
+                File root = act.getFilesDir();
+                File marker = new File(root, "rpe-next/.asset-version");
+                String cur = marker.isFile() ? new String(java.nio.file.Files.readAllBytes(marker.toPath()), StandardCharsets.UTF_8).trim() : "";
+                if (!String.valueOf(RPE_ASSET_VERSION).equals(cur)) {
+                    File dst = new File(root, "rpe-next");
+                    deleteRec(dst);
+                    copyAssetDir(act.getAssets(), "kaichang/rpe-next", dst);
+                    java.nio.file.Files.write(marker.toPath(), String.valueOf(RPE_ASSET_VERSION).getBytes(StandardCharsets.UTF_8));
+                }
+                final String rootPath = root.getAbsolutePath();
+                Log.i(TAG, "[rpe-next] 资源就绪：" + rootPath);
+                safeNative("nativeSetStaticRoot", () -> nativeSetStaticRoot(rootPath));
+            } catch (Throwable t2) {
+                Log.w(TAG, "[rpe-next] 资源解压失败（RPEN 将不可用）", t2);
+            }
+        }, "rpe-assets");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private static void copyAssetDir(android.content.res.AssetManager am, String from, File to) throws Exception {
+        String[] children = am.list(from);
+        if (children == null || children.length == 0) {
+            // 是文件
+            File out = new File(to, from.substring(from.lastIndexOf('/') + 1));
+            out.getParentFile().mkdirs();
+            try (InputStream in = am.open(from); FileOutputStream fo = new FileOutputStream(out)) {
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = in.read(buf)) > 0) fo.write(buf, 0, n);
+            }
+            return;
+        }
+        to.mkdirs();
+        for (String c : children) copyAssetDir(am, from + "/" + c, new File(to, c));
+    }
+
+    private static void deleteRec(File f) {
+        if (f == null || !f.exists()) return;
+        if (f.isDirectory()) { File[] cs = f.listFiles(); if (cs != null) for (File c : cs) deleteRec(c); }
+        //noinspection ResultOfMethodCallIgnored
+        f.delete();
+    }
 
     private static void safeNative(String what, Runnable r) {
         try {
@@ -87,6 +142,10 @@ public class WebViewHost {
         // 仍尊重自身 meta。两者都不走 wide-viewport（980px）缩放。
         s.setUseWideViewPort(false);
         s.setLoadWithOverviewMode(false);
+
+        // RPEN（Re:PhiEdit Next）页面要跑在 http://127.0.0.1 上（file:// 下 ES module 会被拦），
+        // 先把 assets 里的 rpe-next 解压到 filesDir，再通知 Rust 静态服务根目录。
+        ensureRpeNextAssets(activity);
 
         // WebGL 背景光波需要硬件加速的合成层。WebView 覆盖在游戏 SurfaceView 之上时，
         // 显式指定 HARDWARE 层，避免 WebView 表面被按错误分辨率分配、再拉伸进横屏框

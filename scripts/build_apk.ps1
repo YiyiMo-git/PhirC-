@@ -190,7 +190,8 @@ if (Test-Path $kaichangSrc) {
         $src = Join-Path $kaichangSrc $f
         if (Test-Path $src) { Copy-Item $src (Join-Path $kaichangDst $f) -Force }
     }
-    foreach ($d in 'vendor','plugins','assets') {
+    # rpe-next（照搬的 Re:PhiEdit Next）：安卓启动时解压到 filesDir，由本地静态服务托管
+    foreach ($d in 'vendor','plugins','assets','rpe-next') {
         $src = Join-Path $kaichangSrc $d
         if (Test-Path $src) { Copy-Item $src (Join-Path $kaichangDst $d) -Recurse -Force }
     }
