@@ -14,6 +14,8 @@
 use super::{Matrix, Point, Vector};
 use nalgebra::Rotation2;
 
+pub const DEFAULT_BLOCK_COLOR: [f32; 3] = [1., 84. / 255., 84. / 255.];
+
 #[derive(Debug, Clone, Copy)]
 pub struct BlockRotateEvent {
     pub anchor: Vector,
@@ -58,6 +60,12 @@ pub struct BlockArea {
     pub disable_time: f64,
     pub disappear_time: f64,
     pub is_subtract: bool,
+    /// RPEN 分层噪域：所属层下标（非 RPEN 谱面恒为 0）。
+    /// 分层时每层**独立**统计「普通/反转」，互不影响。
+    pub layer: usize,
+    /// RPE `colorEvents` 取到的 RGB（官方 `blockAreaList` 一律用默认红）。
+    /// 见 `parse::rpe` 里对噪域线的解析。
+    pub color: [f32; 3],
     pub rotate_events: Vec<BlockRotateEvent>,
     pub move_events: Vec<BlockMoveEvent>,
     pub scale_events: Vec<BlockScaleEvent>,
@@ -329,6 +337,35 @@ pub fn block_touch_blocked(areas: &[BlockArea], p: Vector, t: f64, aspect: f32) 
     (orig_non as u32) != (orig_sub & 1) && (ins_non as u32) != (ins_sub & 1)
 }
 
+/// **RPEN 新版**反转规则：按层独立统计。
+///
+/// - `single = false`（旧）：某层内「反转个数为奇数」时翻转 —— 和旧版一致，只是改成按层。
+/// - `single = true`（RPEN）：只有该层**恰好 1 个**反转区时才翻转。
+///
+/// 判定与上游一致：任一层的「整块」和「内缩块」都成立才算被挡。
+/// （内缩是为了避免贴边误判，和旧版 `block_touch_blocked` 同一套 inset。）
+pub fn block_touch_blocked_layered(areas: &[BlockArea], p: Vector, t: f64, aspect: f32, single: bool) -> bool {
+    let inset = touch_inset_world(aspect);
+    let coverage = |inset: f32, layer: usize| {
+        let (mut normal, mut inversions) = (false, 0u32);
+        for b in areas.iter().filter(|b| b.layer == layer && b.is_active(t)) {
+            if b.contains(p, t, aspect, inset) {
+                if b.is_subtract {
+                    inversions += 1;
+                } else {
+                    normal = true;
+                }
+            }
+        }
+        let flip = if single { inversions == 1 } else { inversions % 2 == 1 };
+        normal ^ flip
+    };
+    let mut layers: Vec<usize> = areas.iter().map(|b| b.layer).collect();
+    layers.sort_unstable();
+    layers.dedup();
+    layers.into_iter().any(|l| coverage(0., l) && coverage(inset, l))
+}
+
 #[inline]
 fn norm(cur: f64, next: f64, t: f64) -> f64 {
     if next <= cur {
@@ -357,6 +394,8 @@ mod tests {
             disable_time: 100.,
             disappear_time: 100.,
             is_subtract: false,
+            layer: 0,
+            color: DEFAULT_BLOCK_COLOR,
             rotate_events,
             move_events,
             scale_events,
@@ -381,6 +420,8 @@ mod tests {
             disable_time: 3.,
             disappear_time: 4.,
             is_subtract: false,
+            layer: 0,
+            color: DEFAULT_BLOCK_COLOR,
             rotate_events: vec![
                 BlockRotateEvent { anchor: Vector::new(0.6, 0.4), time: 0., ease: 0, rotation: 0. },
                 BlockRotateEvent { anchor: Vector::new(0.6, 0.4), time: 3., ease: 0, rotation: 90. },
@@ -494,5 +535,46 @@ mod tests {
         assert!(block_touch_blocked(&[mk(false)], p, 50., aspect));
         assert!(block_touch_blocked(&[mk(true)], p, 50., aspect));
         assert!(!block_touch_blocked(&[mk(false), mk(true)], p, 50., aspect));
+    }
+
+    /// RPEN 新版规则：每层**独立**统计，且 `single` 时「恰好 1 个反转」才翻转。
+    #[test]
+    fn layered_single_inversion_rule() {
+        let aspect = 2.0;
+        let p = Vector::new(0., 0.);
+        let mk = |sub: bool, layer: usize| {
+            let mut b = blk((0.52, 0.52), (0.48, 0.48), vec![], vec![], vec![]);
+            b.is_subtract = sub;
+            b.layer = layer;
+            b
+        };
+
+        // ① 单层普通区：挡
+        assert!(block_touch_blocked_layered(&[mk(false, 0)], p, 50., aspect, true));
+        // ② 同层「普通 + 1 反转」：反转打洞，不挡
+        assert!(!block_touch_blocked_layered(&[mk(false, 0), mk(true, 0)], p, 50., aspect, true));
+
+        // ③ **分层独立**：layer0 被自己的反转打洞，但 layer1 的普通区仍生效 → 挡
+        let split = [mk(false, 0), mk(true, 0), mk(false, 1)];
+        assert!(
+            block_touch_blocked_layered(&split, p, 50., aspect, true),
+            "每层独立统计：layer1 的普通区不该被 layer0 的反转抵消"
+        );
+        // 旧版全局规则会把这三块混在一起算 → 不挡（正好体现差别）
+        assert!(
+            !block_touch_blocked(&split, p, 50., aspect),
+            "旧版全局规则应得出相反结论"
+        );
+
+        // ④ `single` vs 奇偶：3 个反转时
+        let three = [mk(false, 0), mk(true, 0), mk(true, 0), mk(true, 0)];
+        assert!(
+            block_touch_blocked_layered(&three, p, 50., aspect, true),
+            "single 规则：3 个反转 ≠ 1 → 不翻转 → 仍挡"
+        );
+        assert!(
+            !block_touch_blocked_layered(&three, p, 50., aspect, false),
+            "奇偶规则：3 个反转是奇数 → 翻转 → 不挡"
+        );
     }
 }

@@ -1,0 +1,30 @@
+[package]
+name = "bp-host"
+version = "0.1.0"
+edition = "2021"
+description = "BP 赛事主持工具：主机-客户端组网 + 可配置回合状态机 + 干扰互动层"
+license = "Apache-2.0"
+
+# 独立 workspace：照抄 phira-duel 的做法，不并进 phira-0.8.2 主 workspace，
+# 避免打 App / CI 时被牵连。
+[workspace]
+
+[features]
+default = ["tauri"]
+# 关闭 tauri 特性 = standalone 服务器形态（cargo check --no-default-features，编译链更轻）
+tauri = ["dep:tauri"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros", "fs"] }
+axum = { version = "0.7", features = ["ws"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tauri = { version = "2", optional = true }
+
+[build-dependencies]
+tauri-build = { version = "2" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }

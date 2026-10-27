@@ -75,6 +75,9 @@ pub struct EndingScene {
     upload_task: Option<(Task<Result<RecordUpdateState>>, MessageHandle)>,
     record_data: Option<Vec<u8>>,
     best_record: Option<SimpleRecord>,
+    /// 新纪录：(原最佳分数, 多出的分数)。只在「本次真的超过原最佳」时有值，
+    /// 用来在结算画面画 `NEW BEST 原分数 + 多出的分数`。
+    new_best: Option<(i32, i32)>,
 
     btn_retry: DRectButton,
     btn_proceed: DRectButton,
@@ -109,6 +112,7 @@ impl EndingScene {
         historic_best: u32,
         record_data: Option<Vec<u8>>,
         best_record: Option<SimpleRecord>,
+        new_best: Option<(i32, i32)>,
         avg_fps: Option<f32>,
     ) -> Result<Self> {
         let mut audio = create_audio_manger(config)?;
@@ -171,6 +175,7 @@ impl EndingScene {
             upload_task,
             record_data,
             best_record,
+            new_best,
 
             btn_retry: DRectButton::new(),
             btn_proceed: DRectButton::new(),
@@ -375,6 +380,22 @@ impl Scene for EndingScene {
                 Color::new(1., 1., 1., pa),
                 0.4,
             );
+            // NEW BEST：本次真的超过原最佳时才画。格式 `NEW BEST 原分数 + 多出的分数`。
+            // 放在分数**上方**（r0 是分数文本框，anchor(0,1) 所以 r0.y 是分数顶）。
+            if let Some((old_best, diff)) = self.new_best {
+                let pb = ran(t, 1.35, 1.60);
+                draw_text_aligned_opt_width_using(
+                    ui,
+                    &GAME_FONT,
+                    &format!("NEW BEST {old_best:07} + {diff:07}"),
+                    r0.x,
+                    r0.y - 0.016,
+                    (0., 1.),
+                    0.30,
+                    Color::new(1., 0.83, 0.32, pb),
+                    0.62,
+                );
+            }
             let ps = ran(t, 2.50, 2.90).powi(3);
             let pa = ran(t, 2.40, 2.70);
             let s = main.h * 0.72;

@@ -17,10 +17,14 @@ import android.os.Bundle;
 import android.os.ParcelFileDescriptor;
 import android.util.DisplayMetrics;
 import android.util.Log;
+import android.view.Display;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
@@ -85,6 +89,25 @@ class QuadSurface extends SurfaceView implements View.OnTouchListener, View.OnKe
         QuadNative.surfaceOnSurfaceDestroyed(holder.getSurface());
     }
 
+    /**
+     * 向 Surface 投帧率票。Android 11+ 用 `Surface.setFrameRate`（FILL 语义：
+     * 系统挑不超过它的最高档），更老的系统只在窗口层投票（见 applyRequestedFrameRate）。
+     */
+    void setTargetFrameRate(float rate, boolean force, boolean focused) {
+        try {
+            Surface surface = getHolder().getSurface();
+            if (!surface.isValid()) {
+                return;
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                surface.setFrameRate(rate, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                        focused ? Surface.CHANGE_FRAME_RATE_ALWAYS : Surface.CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS);
+            }
+        } catch (Throwable t) {
+            CrashLog.stage("[refresh] surface 投票失败：" + t);
+        }
+    }
+
     @Override
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
         // 游戏线程会一直等这条消息才开始建 EGL 上下文，记一笔方便确认「到底有没有画面」
@@ -98,19 +121,47 @@ class QuadSurface extends SurfaceView implements View.OnTouchListener, View.OnKe
      * ⚠️ 这是**移动端能打字的关键**：`SurfaceView` 默认不提供输入连接，于是
      * `InputMethodManager.showSoftInput(view, 0)` 之后输入法虽然弹出来了，
      * `commitText` 却无处可去 —— 字符永远到不了原生层。表现就是
-     * 「键盘弹出来了、但一个字都打不进去」。这里接上，把输入法提交的文本逐字符
-     * 转发给 `QuadNative.surfaceOnCharacter`（miniquad 已有该 JNI 入口），
-     * 删除键转发成 `surfaceOnKeyDown/Up(KEYCODE_DEL)`，「完成」键转发成 Enter。
+     * 「键盘弹出来了、但一个字都打不进去」。
+     *
+     * 所有软键盘输入都走 Rust 的线程安全 `IME_BUFFER`（和 iOS 同一条路），避免数据竞争：
+     *   * 文本 → `QuadNative.imeChar(int)`（UTF-32 码点，直接进缓冲区）；
+     *   * 删除 → `QuadNative.imeBackspace(int)`（删除个数计数通道）；
+     *   * 「完成」→ `QuadNative.imeConfirm()`（确认事件）。
+     * 这三者都不碰 macroquad 的裸键 / 字符队列（IME 线程 push / 渲染线程 pop 无同步，
+     * 是「输入框有时把整个软件卡死」的根因）。
      */
     private static boolean gImeLogged = false;
 
     @Override
     public InputConnection onCreateInputConnection(android.view.inputmethod.EditorInfo outAttrs) {
+        // ⚠️ **不要**加 `TYPE_TEXT_VARIATION_VISIBLE_PASSWORD`！
+        //
+        // 之前这里是 `TYPE_CLASS_TEXT | TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        // | TYPE_TEXT_VARIATION_VISIBLE_PASSWORD` —— 用 VISIBLE_PASSWORD 是为了
+        // 「文字可见 + 压掉联想和自动纠错」，但它是**密码变体**，很多输入法（搜狗、
+        // 各家安全输入法）看到它就直接切到**密码安全键盘**：没有候选栏、没有剪贴板、
+        // 布局也变样。用户报的「输入框默认弹出的是安全键盘」就是它。
+        //
+        // 正确做法：用普通的 `TYPE_CLASS_TEXT`，靠这两个 flag 达到原本的目的 ——
+        //   * TYPE_TEXT_FLAG_NO_SUGGESTIONS        —— 不出候选/联想（inputType 标志）
+        //   * IME_FLAG_NO_PERSONALIZED_LEARNING    —— 不让输入法把输入学进用户词库
+        // 两者都不改变键盘形态，弹出的是正常键盘。
+        //
+        // ⚠️ 这两个标志**不在同一个桶里**：
+        //   - `TYPE_TEXT_FLAG_NO_SUGGESTIONS` 是 `android.text.InputType` 的 inputType 位；
+        //   - `IME_FLAG_NO_PERSONALIZED_LEARNING` 是 `android.view.inputmethod.EditorInfo`
+        //     的 **imeOptions** 位（API 26+，minSdk 26 满足）。
+        //   之前误写成 `InputType.TYPE_TEXT_FLAG_NO_PERSONALIZED_LEARNING`（这个常量
+        //   **根本不存在**）并 OR 进 inputType，导致 javac 直接编译失败 ——
+        //   见 `build_apk.log` 里 `:app:compileReleaseJavaWithJavac FAILED`。
+        //
+        // 真正的密码字段由自绘输入框自己打成 `*`（`input_dialog.rs`），不依赖输入法变体；
+        // 旧的 `moe/mivik/inputbox/InputBox.java` 也自己按模式设了正确的 inputType。
         outAttrs.inputType = android.text.InputType.TYPE_CLASS_TEXT
-                | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-                | android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD;
+                | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
         outAttrs.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
-                | android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN;
+                | android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN
+                | android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING;
         if (!gImeLogged) {
             gImeLogged = true;
             CrashLog.stage("onCreateInputConnection: 输入法已连接（可以打字了）");
@@ -119,8 +170,18 @@ class QuadSurface extends SurfaceView implements View.OnTouchListener, View.OnKe
             @Override
             public boolean commitText(CharSequence text, int newCursorPosition) {
                 if (text != null) {
-                    for (int i = 0; i < text.length(); i++) {
-                        QuadNative.surfaceOnCharacter(text.charAt(i));
+                    // ⚠️ 必须用**码点**遍历，不能直接 `charAt(i)`：
+                    // `charAt` 返回 UTF-16 code unit，emoji / 生僻字是代理对，
+                    // 会被拆成两个孤立的代理值发给 Rust，拼不出原字符。
+                    // 走 `QuadNative.imeChar(int)` —— 它把 UTF-32 码点**直接**压进
+                    // Rust 的线程安全 `IME_BUFFER`（和退格同一个互斥锁），不再碰
+                    // macroquad 的裸字符队列（那是「输入框有时把整个软件卡死」的根因：
+                    // IME 线程 push / 渲染线程 pop 之间无同步，会数据竞争）。
+                    String s = text.toString();
+                    for (int i = 0; i < s.length(); ) {
+                        int cp = s.codePointAt(i);
+                        QuadNative.imeChar(cp);
+                        i += Character.charCount(cp);
                     }
                 }
                 return true;
@@ -141,10 +202,16 @@ class QuadSurface extends SurfaceView implements View.OnTouchListener, View.OnKe
 
             @Override
             public boolean deleteSurroundingText(int beforeLength, int afterLength) {
-                for (int i = 0; i < beforeLength; i++) {
-                    QuadNative.surfaceOnKeyDown(KeyEvent.KEYCODE_DEL);
-                    QuadNative.surfaceOnKeyUp(KeyEvent.KEYCODE_DEL);
+                // ⚠️ 一次把「删除个数」传过去，**不要**在这里连发 N 次 DEL 键事件：
+                // 那 N 个事件会在同一帧入队，而 macroquad 的 `keys_pressed` 是 `HashSet`，
+                // 同一个键在同一帧多次按下会坍缩成一次 —— 结果只删掉 1 个字符，
+                // 「选中一段文字后粘贴 / 输入」时旧字符会残留。
+                // 走 `imeBackspace` 计数通道，个数与顺序都保真（见 QuadNative.imeBackspace）。
+                if (beforeLength > 0) {
+                    QuadNative.imeBackspace(beforeLength);
                 }
+                // afterLength（向后删）在引擎当前「一律尾部追加 / 尾部退格」的文本模型里
+                // 表达不了，输入法也极少用到；这里明确忽略，而不是假装处理。
                 return true;
             }
 
@@ -163,9 +230,12 @@ class QuadSurface extends SurfaceView implements View.OnTouchListener, View.OnKe
 
             @Override
             public boolean performEditorAction(int actionCode) {
-                // 输入法右下角那个「完成 / 前往」按钮 = 回车（用来确认游戏内输入框）。
-                QuadNative.surfaceOnKeyDown(KeyEvent.KEYCODE_ENTER);
-                QuadNative.surfaceOnKeyUp(KeyEvent.KEYCODE_ENTER);
+                // 输入法右下角那个「完成 / 前往」按钮 = 确认游戏内输入框。
+                // ⚠️ 不再走 `surfaceOnKeyDown/Up(KEYCODE_ENTER)`：那个事件照旧进
+                // macroquad 的裸键队列，有 IME 线程 / 渲染线程竞争（同卡死根因）。
+                // 改走 `QuadNative.imeConfirm()` —— 它把「确认」压进线程安全的
+                // `IME_BUFFER`，和字符、退格同一条安全路径。语义 = 确定，等价于面板「确定」按钮。
+                QuadNative.imeConfirm();
                 return true;
             }
         };
@@ -251,6 +321,25 @@ public class MainActivity extends Activity {
     private static final int LOG_PREVIEW_CHARS = 4000;
 
     private QuadSurface view;
+    // ---- 刷新率（从 Phira-Pro 移植）----
+    /** 允许请求的档位：Rust 侧只允许传这些值，防止传进来一个离谱数字。 */
+    private static final int[] SUPPORTED_GAME_REFRESH_RATES = {60, 120, 144, 165, 185, 200, 240};
+    private float requestedFrameRate = 120f;
+    private float reportedMaxRefreshRate = 0f;
+    private boolean activityResumed = false;
+    private String displayDiagnostics = "{}";
+    private final android.os.Handler refreshHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    /** 窗口 / Surface 变化后系统要一小会儿才稳定：300ms 与 1s 各重试一次，**不**用常驻定时器。 */
+    private final Runnable refreshRetry = () -> {
+        try {
+            applyRequestedFrameRate(false, "retry");
+        } catch (Throwable t) {
+            CrashLog.stage("[refresh] retry 失败：" + t);
+        }
+    };
+    /** WebView 叠在游戏画面之上（默认隐藏，只有 Rust 请求时才显示）。 */
+    private FrameLayout rootLayout;
+    private WebViewHost webHost;
     private static String libLoadError = null;
     /** libphira.so 是否已经加载好。加载之前调任何 native 方法都只会抛
      *  UnsatisfiedLinkError —— 而传感器回调每秒几十次，绝不能在库加载前注册：
@@ -265,8 +354,6 @@ public class MainActivity extends Activity {
 
     private SensorManager sensorManager;
     private Sensor motionSensor;
-    /** WebView 开始界面宿主（webui feature）。Rust 通过静态方法驱动它。 */
-    private static WebUIView webUIView;
     /** 监听器是否在注册状态（unregister 之后还能再注册回来） */
     private boolean motionRegistered = false;
     /** 平滑后的摇动强度（g），避免单帧抖动导致误判 */
@@ -360,108 +447,8 @@ public class MainActivity extends Activity {
         }
     }
 
-    // ---- WebView 开始界面：供 Rust 通过 JNI 调用的静态入口 ----
-    //
-    // 符号：Java_org_1flos_1phira_1modded_MainActivity_webui*
-    // Rust 侧只关心「建好没有 / 灌资源 / 切可见 / 执行 JS / 加载首页」。
-
-    /**
-     * WebView 宿主所在 Activity（供静态入口投递到 UI 线程用）。
-     *
-     * <p>⚠️ 这几个静态入口是 Rust 从**游戏线程**调的，而 `webUIView` 是在
-     * **UI 线程**异步创建的。原来它们直接同步读 `webUIView`，于是：
-     * Rust 紧接着 `webuiCreate` 调 `webuiSetVisible(true)` 时 `webUIView` 往往
-     * 还是 null → **这次「显示请求」被静默丢弃** → `wantVisible` 一直 false →
-     * 页面加载完也保持 GONE → 只看到原生界面。
-     *
-     * <p>现在统一 `runOnUiThread` 投递：所有请求进同一条 UI 线程队列、**按调用顺序
-     * 执行**，于是 `create` 一定先跑完，后面的 `setVisible` 才看得到非空实例。
-     */
-    private static Activity webuiActivity;
-
-    /** 在 UI 线程创建 WebView（幂等）。 */
-    public static void webuiCreate(final Activity activity) {
-        if (activity == null) return;
-        webuiActivity = activity;
-        activity.runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    if (webUIView == null) {
-                        webUIView = new WebUIView((MainActivity) activity);
-                    }
-                    webUIView.create();
-                } catch (Throwable t) {
-                    CrashLog.error("webuiCreate failed", t);
-                }
-            }
-        });
-    }
-
-    /** 把一份内嵌资源交给 WebView。
-     *  <p>这条**不需要**投递：`WebUIView.ASSETS` 是一张加锁的静态表，任何线程任何时刻写都对。 */
-    public static void webuiPutAsset(String path, byte[] data) {
-        WebUIView.putAssetStatic(path, data);
-    }
-
-    /** 加载首页（幂等）。投到 UI 线程，保证在 `create` 之后执行。 */
-    public static void webuiLoadHome() {
-        final Activity a = webuiActivity;
-        if (a == null) return;
-        a.runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                if (webUIView != null) webUIView.loadHome();
-            }
-        });
-    }
-
-    /** 切可见。投到 UI 线程，保证在 `create` 之后执行（否则会被丢弃）。 */
-    public static void webuiSetVisible(final boolean visible) {
-        final Activity a = webuiActivity;
-        if (a == null) return;
-        a.runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                if (webUIView != null) webUIView.setVisible(visible);
-            }
-        });
-    }
-
-    public static void webuiEval(final String js) {
-        final Activity a = webuiActivity;
-        if (a == null) return;
-        a.runOnUiThread(new Runnable() {
-            @Override
-            public void run() {
-                if (webUIView != null) webUIView.evaluate(js);
-            }
-        });
-    }
-
-    public static boolean webuiReady() {
-        WebUIView v = webUIView;
-        return v != null;
-    }
-
-    public static void webuiDestroy() {
-        final Activity a = webuiActivity;
-        webuiActivity = null;
-        if (a != null) {
-            a.runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    WebUIView v = webUIView;
-                    webUIView = null;
-                    if (v != null) v.destroy();
-                }
-            });
-            return;
-        }
-        WebUIView v = webUIView;
-        webUIView = null;
-        if (v != null) v.destroy();
-    }
+    /** 离线渲染请求（Rust 侧导出为 Java_org_flos_phira_modded_MainActivity_nativeRenderArg）。 */
+    private static native void nativeRenderArg(String arg);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -490,6 +477,19 @@ public class MainActivity extends Activity {
         final String previous = CrashLog.read(getFilesDir());
         CrashLog.clear(getFilesDir());
         CrashLog.stage("onCreate 进入");
+
+        // 离线渲染触发（手机上没有命令行）：
+        //   adb shell am start -n org.flos.phira.modded/.MainActivity -e render "/sdcard/charts/X|X.mp4"
+        // 拿不到就不影响正常启动；native 方法缺失也只会记一条日志。
+        try {
+            String renderArg = getIntent() != null ? getIntent().getStringExtra("render") : null;
+            if (renderArg != null && !renderArg.isEmpty()) {
+                CrashLog.stage("收到渲染请求: " + renderArg);
+                call("nativeRenderArg", () -> nativeRenderArg(renderArg));
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "读取 render intent 失败", t);
+        }
         if (CrashLog.looksLikeFailure(previous)) {
             showPreviousLog(previous);
             return;
@@ -560,8 +560,24 @@ public class MainActivity extends Activity {
         CrashLog.stage("initializeEnvironment 完成（inputbox 后端）");
 
         view = new QuadSurface(this);
-        setContentView(view);
-        CrashLog.stage("SurfaceView 就绪");
+        // 用 FrameLayout 包一层：游戏画面在底层，WebView 叠在上面（默认 GONE）。
+        // 这样以后 WebView 界面层可以在安卓上复用同一套 HTML，不影响现有原生渲染。
+        rootLayout = new FrameLayout(this);
+        rootLayout.addView(view, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        setContentView(rootLayout);
+        CrashLog.stage("SurfaceView 就绪（FrameLayout 已就位）");
+
+        // 懒创建 WebView：失败也绝不能拖垮游戏启动
+        try {
+            webHost = new WebViewHost();
+            webHost.init(this, rootLayout);
+            CrashLog.stage("WebView 宿主已创建（隐藏）");
+        } catch (Throwable t) {
+            webHost = null;
+            Log.w(TAG, "WebView 宿主创建失败（不影响原生界面）", t);
+            CrashLog.stage("WebView 宿主创建失败：" + t);
+        }
 
         // miniquad 的 activityOnCreate 会启动游戏（内部起线程后返回，游戏在别的线程跑）
         CrashLog.stage("调用 activityOnCreate");
@@ -585,6 +601,8 @@ public class MainActivity extends Activity {
             call("activityOnResume", () -> QuadNative.activityOnResume());
             call("prprActivityOnResume", () -> QuadNative.prprActivityOnResume());
         }
+        activityResumed = true;
+        requestRefreshRateUpdate("resume");
         startMotionSensor();
     }
 
@@ -659,9 +677,177 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** Rust 侧通过 JNI 调这个（对应 `set_refresh_rate`）。 */
+    public void setRequestedFrameRate(int frameRate) {
+        boolean supported = false;
+        for (int rate : SUPPORTED_GAME_REFRESH_RATES) {
+            supported |= frameRate == rate;
+        }
+        if (!supported) {
+            CrashLog.stage("[refresh] 拒绝不支持的刷新率：" + frameRate);
+            return;
+        }
+        runOnUiThread(() -> {
+            requestedFrameRate = frameRate;
+            requestRefreshRateUpdate("user setting");
+        });
+    }
+
+    void requestRefreshRateUpdate(String reason) {
+        try {
+            if (view == null) {
+                return;
+            }
+            refreshHandler.removeCallbacks(refreshRetry);
+            applyRequestedFrameRate(true, reason);
+            // 窗口/Surface 稳定后再补两次，避免首次申请落在过渡态上
+            refreshHandler.postDelayed(refreshRetry, 300);
+            refreshHandler.postDelayed(refreshRetry, 1000);
+        } catch (Throwable t) {
+            CrashLog.stage("[refresh] 申请失败：" + t);
+        }
+    }
+
     @Override
+    public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused);
+        if (activityResumed) {
+            requestRefreshRateUpdate(focused ? "focus restored" : "visible under overlay");
+        }
+    }
+
+    @Override
+    public void onTopResumedActivityChanged(boolean topResumed) {
+        super.onTopResumedActivityChanged(topResumed);
+        if (activityResumed) {
+            requestRefreshRateUpdate(topResumed ? "top resumed" : "multi-resume under overlay");
+        }
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        requestRefreshRateUpdate("configuration changed");
+    }
+
+    @Override
+    public void onMultiWindowModeChanged(boolean isInMultiWindowMode) {
+        super.onMultiWindowModeChanged(isInMultiWindowMode);
+        requestRefreshRateUpdate(isInMultiWindowMode ? "multi-window" : "fullscreen");
+    }
+
+    public String getDisplayDiagnostics() {
+        return displayDiagnostics;
+    }
+
+    private void applyRequestedFrameRate(boolean force, String reason) {
+        Display display = getWindowManager().getDefaultDisplay();
+        float maxRefreshRate = display.getRefreshRate();
+        float selectedRate = -1f;
+        Display.Mode selectedMode = null;
+        int selectedModeId = 0;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Display.Mode currentMode = display.getMode();
+            Display.Mode[] modes = display.getSupportedModes();
+            int[] widths = new int[modes.length];
+            int[] heights = new int[modes.length];
+            float[] rates = new float[modes.length];
+            for (int i = 0; i < modes.length; i++) {
+                Display.Mode mode = modes[i];
+                float rate = mode.getRefreshRate();
+                widths[i] = mode.getPhysicalWidth();
+                heights[i] = mode.getPhysicalHeight();
+                rates[i] = rate;
+                maxRefreshRate = Math.max(maxRefreshRate, rate);
+                // S+ 上系统可能只报了 modes 没报 alternative，得把它也算进「设备上限」
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    for (float alternative : mode.getAlternativeRefreshRates()) {
+                        maxRefreshRate = Math.max(maxRefreshRate, alternative);
+                    }
+                }
+            }
+            int selected = RefreshRatePolicy.legacyMode(requestedFrameRate, currentMode.getPhysicalWidth(),
+                    currentMode.getPhysicalHeight(), widths, heights, rates);
+            selectedMode = selected >= 0 ? modes[selected] : currentMode;
+            selectedRate = selectedMode.getRefreshRate();
+            selectedModeId = selectedMode.getModeId();
+        } else {
+            for (float rate : display.getSupportedRefreshRates()) {
+                maxRefreshRate = Math.max(maxRefreshRate, rate);
+                if (rate <= requestedFrameRate + 0.5f && rate > selectedRate) {
+                    selectedRate = rate;
+                }
+            }
+            if (selectedRate < 0f) {
+                for (float rate : display.getSupportedRefreshRates()) {
+                    if (selectedRate < 0f || rate < selectedRate) {
+                        selectedRate = rate;
+                    }
+                }
+            }
+            if (selectedRate < 0f) {
+                selectedRate = display.getRefreshRate();
+            }
+        }
+        // 只在变化时上报，避免每秒几十次 JNI 往返
+        if (Math.abs(reportedMaxRefreshRate - maxRefreshRate) > 0.01f && nativeReady) {
+            reportedMaxRefreshRate = maxRefreshRate;
+            try {
+                QuadNative.setMaxRefreshRate(maxRefreshRate);
+            } catch (Throwable t) {
+                CrashLog.stage("[refresh] setMaxRefreshRate 失败：" + t);
+            }
+        }
+        Window window = getWindow();
+        WindowManager.LayoutParams attributes = window.getAttributes();
+        float windowRate = RefreshRatePolicy.windowRate(Build.VERSION.SDK_INT, requestedFrameRate, selectedRate);
+        int windowMode = RefreshRatePolicy.windowModeId(Build.VERSION.SDK_INT, selectedModeId);
+        boolean changed = Math.abs(attributes.preferredRefreshRate - windowRate) > 0.01f;
+        attributes.preferredRefreshRate = windowRate;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            changed |= attributes.preferredDisplayModeId != windowMode;
+            attributes.preferredDisplayModeId = windowMode;
+        }
+        if (changed || force) {
+            window.setAttributes(attributes);
+        }
+        // Android 11+ 保留用户的投票：临时的 60Hz 模式上报不能悄悄顶掉 144Hz 的请求
+        if (view != null) {
+            view.setTargetFrameRate(Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ? requestedFrameRate : selectedRate,
+                    force, force && view.hasWindowFocus());
+        }
+        recordDisplayState(display, windowRate, windowMode, maxRefreshRate, reason);
+    }
+
+    /** 显示状态诊断（供「设置 → 日志」页看，排查分屏/浮窗下帧率不生效）。 */
+    private void recordDisplayState(Display display, float windowRate, int windowMode, float maximum, String reason) {
+        try {
+            android.os.PowerManager power = (android.os.PowerManager) getSystemService(POWER_SERVICE);
+            boolean multiWindow = Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && isInMultiWindowMode();
+            org.json.JSONObject state = new org.json.JSONObject()
+                    .put("reason", reason)
+                    .put("requested_hz", requestedFrameRate)
+                    .put("reported_display_hz", display.getRefreshRate())
+                    .put("reported_maximum_hz", maximum)
+                    .put("window_preferred_hz", windowRate)
+                    .put("window_mode_id", windowMode)
+                    .put("multi_window", multiWindow)
+                    .put("low_power", power != null && power.isPowerSaveMode())
+                    .put("surface_valid", view != null && view.getHolder().getSurface().isValid());
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && power != null) {
+                state.put("thermal_status", power.getCurrentThermalStatus());
+            }
+            displayDiagnostics = state.toString();
+        } catch (Throwable t) {
+            CrashLog.stage("[refresh] 诊断失败：" + t);
+        }
+    }
+
     protected void onPause() {
         super.onPause();
+        activityResumed = false;
+        // 后台了就别再重试（避免空转），恢复时 onResume 会重新申请
+        refreshHandler.removeCallbacks(refreshRetry);
         stopMotionSensor();
         // 游戏没启动过就没什么可暂停的（miniquad 的消息通道还不存在）
         if (gameStarted) {
@@ -673,14 +859,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        refreshHandler.removeCallbacks(refreshRetry);
         InputBox.setActivity(null);
         CrashLog.stage("[exit] onDestroy（正常退出）");
-        // WebView 必须显式销毁，否则它持有的 Activity 引用会泄漏
-        try {
-            webuiDestroy();
-        } catch (Throwable t) {
-            CrashLog.error("webuiDestroy failed", t);
-        }
         if (gameStarted) {
             call("prprActivityOnDestroy", () -> QuadNative.prprActivityOnDestroy());
             call("activityOnDestroy", () -> QuadNative.activityOnDestroy());

@@ -55,6 +55,31 @@ use std::{
 pub static PREFER_REDUCED_MOTION: AtomicBool = AtomicBool::new(false);
 pub static UI_SFX_VOLUME: AtomicU32 = AtomicU32::new(1.0f32.to_bits());
 
+thread_local! {
+    /// 滑块是否画成 Phigros 的**斜切轨道 + 斜切手柄**。
+    ///
+    /// 只影响观感，不影响拖拽命中逻辑（命中仍按未斜切的矩形算，斜切只差几像素边角）。
+    /// 由设置页渲染期间置位，渲染完复位；其它页面（如铺面偏移）保持原来的圆头轨道。
+    static SKEW_SLIDERS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 设置 / 复位滑块的斜切样式（见 [`SKEW_SLIDERS`]）。
+pub fn set_skew_sliders(v: bool) {
+    SKEW_SLIDERS.with(|c| c.set(v));
+}
+
+/// 平行四边形路径（斜切轨道 / 手柄用）。
+fn skew_path_of(r: Rect, skew: f32) -> Path {
+    let d = skew * 0.5;
+    let mut p = Path::builder();
+    p.begin(lm::point(r.x + d, r.y));
+    p.line_to(lm::point(r.right() + d, r.y));
+    p.line_to(lm::point(r.right() - d, r.bottom()));
+    p.line_to(lm::point(r.x - d, r.bottom()));
+    p.end(true);
+    p.build()
+}
+
 #[derive(Default, Clone, Copy)]
 pub struct Gravity(u8);
 
@@ -636,7 +661,7 @@ impl Slider {
 
             touch: None,
             rect: Rect::default(),
-            pos: f32::INFINITY,
+            pos: <f32>::INFINITY,
         }
     }
 
@@ -701,6 +726,18 @@ impl Slider {
         let p = (p - self.range.start) / (self.range.end - self.range.start);
         let pos = (r.x + r.w * p, cy);
         self.pos = ui.to_global(pos).0;
+        if SKEW_SLIDERS.with(|c| c.get()) {
+            // Phigros 版式：斜切轨道（未填充 = 暗墨色 / 已填充 = 白）+ 斜切白色手柄。
+            let h = 0.026;
+            let sk = h * 0.36;
+            ui.fill_path(&skew_path_of(Rect::new(r.x, cy - h * 0.5, r.w, h), sk), Color { a: 0.28, ..theme::ink(1.) });
+            if p > 0.002 {
+                ui.fill_path(&skew_path_of(Rect::new(r.x, cy - h * 0.5, r.w * p, h), sk), WHITE);
+            }
+            let hs = 0.042;
+            ui.fill_path(&skew_path_of(Rect::new(pos.0 - hs * 0.5, cy - hs * 0.5, hs, hs), hs * 0.36), WHITE);
+            return;
+        }
         use lyon::math::point;
         ui.stroke_options = ui.stroke_options.with_line_cap(LineCap::Round);
         // 轨道统一：**已填充 = 强调色，未填充 = 主题墨色的低透明度**。

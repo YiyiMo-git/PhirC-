@@ -370,7 +370,8 @@ impl Page for ResPackPage {
         let import_h = m.u(46.);
         let import_r = Rect::new(list_r.x, list_r.y, list_r.w, import_h);
         let row_h = m.u(56.);
-        let row_gap = m.u(8.);
+        // （原来的 `row_gap = m.u(8.)` 已删：改成 iOS 分组列表后行是**紧贴**的，
+        //   分隔靠 `group_row` 画的内缩发丝线，不再需要行间距。）
         let scroll_y = import_r.bottom() + m.u(12.);
         let scroll_h = (list_r.bottom() - scroll_y).max(m.u(10.));
         self.btns_scroll.size((list_r.w, scroll_h));
@@ -410,14 +411,27 @@ impl Page for ResPackPage {
                 ui.dy(scroll_y);
                 self.btns_scroll.render(ui, |ui| {
                     let mut y = 0.;
+                    // iOS 分组列表：行与行**紧贴**，分隔靠内缩发丝线
+                    // （原来是「每行一张独立圆角卡 + `row_gap`」，那是卡片语言的观感）。
+                    // 行比外层 `acrylic` 面板窄，所以 `radius` 传 0 —— 悬停/选中就是方角高亮。
+                    let n = self.items.len();
                     for (index, item) in self.items.iter_mut().enumerate() {
                         let row = Rect::new(0., y, list_r.w, row_h);
-                        if index == selected {
-                            crate::newui::glass_plate_w(ui, row, m.u(10.), &th, 0., th.with_a(th.glow, 0.16), th.with_a(th.glow, 0.55));
-                        } else {
-                            crate::newui::acrylic(ui, row, m.u(10.), &th);
-                            crate::newui::rounded_stroke(ui, row, m.u(10.), m.u(1.), th.border);
-                        }
+                        crate::newui::group_row(
+                            ui,
+                            &th,
+                            row,
+                            0.,
+                            index == 0,
+                            index + 1 == n,
+                            0.,
+                            m.u(14.),
+                            if index == selected {
+                                th.with_a(th.glow, 0.16)
+                            } else {
+                                Color::new(0., 0., 0., 0.)
+                            },
+                        );
                         crate::newui::text_ellipsis(ui, &m, &item.name, row.x + m.u(14.), row.center().y, 14., row.w - m.u(28.), if index == selected { th.text_hi } else { th.text }, (0., 0.5));
                         // 每张卡片的删除按钮（内置资源包不显示）
                         if index > 0 {
@@ -426,7 +440,7 @@ impl Page for ResPackPage {
                             crate::newui::draw_icon(ui, &m, crate::newui::Icon::Delete, dr.feather(-m.u(2.)), th.text_dim, 1.6);
                         }
                         item.btn.inner.set(ui, row);
-                        y += row_h + row_gap;
+                        y += row_h;
                     }
                     (list_r.w, y)
                 });

@@ -23,6 +23,7 @@ pub mod practice_view;
 /// 练习模式的流速曲线（分段线性，1x 为分界）——从 PhiraiAd 移植，纯数学。
 pub mod practice_speed;
 pub mod record;
+pub mod replay;
 pub mod scene;
 pub mod spectrum;
 pub mod task;

@@ -16,8 +16,9 @@ video = ["prpr/video"]
 chat = []
 hykb = []
 event_debug = []
-# 嵌入 Phirc Mod++ 的 WebView 界面（登录 / 开始 / 曲库）。
-# 仅 Windows + wry 真正实现；默认关闭，关闭时界面走原有 Rust UI。
+# 用 WebView 显示开始界面（`kaichang/index.html`，逐字节不改）。
+# 目前只有 Windows 有真实宿主（wry）；关掉时一切照旧走 macroquad 原生 UI。
+# 构建：cargo build --release -p phira-main --no-default-features --features webui
 webui = ["dep:wry", "dep:raw-window-handle"]
 
 [dependencies]
@@ -25,6 +26,7 @@ anyhow = { workspace = true }
 arc-swap = "1.9.0"
 async-trait = { workspace = true }
 base64 = { workspace = true }
+flate2 = { workspace = true }
 bitflags = { workspace = true }
 bytes = "1.11.1"
 bytesize = "2.3.1"
@@ -108,13 +110,12 @@ sasa = { workspace = true, default-features = true }
 rfd = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# 仅在使用 `webui` feature 时才编译（可选依赖）
-# wry 0.44 提供 new_as_child + with_custom_protocol + with_ipc_handler，适合挂到已有窗口
+# 只有开 `webui` feature 时才编译（可选依赖）。
+# wry 0.44 提供 new_as_child + with_custom_protocol + with_ipc_handler，适合挂到已有窗口。
 wry = { version = "0.44", optional = true }
 # wry 0.44 依赖 raw-window-handle 0.6：把 macroquad 窗口 HWND 包装成 HasWindowHandle
 raw-window-handle = { version = "0.6", optional = true }
-# 用于从 macroquad 窗口标题拿到 HWND，把 WebView 挂成子窗口
-# HiDpi：用 GetDpiForWindow 把 GetClientRect 的物理像素换算成 wry 需要的逻辑像素
+# 找窗口 HWND / 泵 Win32 消息 / GetDpiForWindow 换算逻辑像素
 windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_HiDpi",

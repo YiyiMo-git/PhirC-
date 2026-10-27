@@ -14,7 +14,7 @@ use macroquad::prelude::*;
 use prpr::{
     config::Mods,
     core::BOLD_FONT,
-    ext::{semi_black, semi_white, RectExt, SafeTexture},
+    ext::{semi_black, RectExt, SafeTexture},
     info::ChartInfo,
     scene::{NextScene, Scene},
     time::TimeManager,
@@ -258,6 +258,7 @@ impl Scene for ChapterScene {
                     force_aspect_ratio: false,
                     use_rpe_170_speed: Some(false),
                     use_attach_ui_fix: Some(true),
+                    use_rpen: Some(false),
 
                     created: None,
                     updated: None,
@@ -305,7 +306,9 @@ impl Scene for ChapterScene {
             .size(0.44)
             .max_width(0.74)
             .multiline()
-            .color(semi_white(p))
+            // 介绍文字压在章节封面上（封面叠了 `semi_black(0.3)`，恒深）→ 写死白。
+            // `semi_white` 是主题墨色，浅色主题下会翻成深色，压在暗封面上看不见。
+            .color(Color::new(1., 1., 1., p))
             .draw();
 
         let r = Rect::new(r.x, 0.3, 0.24, 0.1);

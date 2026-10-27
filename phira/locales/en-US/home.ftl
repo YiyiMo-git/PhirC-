@@ -28,3 +28,8 @@ menu-about = About
 menu-quit = Quit
 
 about-desc = Community-driven rhythm game platform
+
+char-imported = Illustration imported. Restart the app to apply.
+char-import-failed = Failed to import illustration
+hint-character-detail = Click the artwork on the left for character details
+last-played-none = Last played chart

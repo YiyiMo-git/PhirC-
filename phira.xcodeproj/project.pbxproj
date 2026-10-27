@@ -136,7 +136,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "set -euo pipefail\n\necho \"PROJECT_DIR=$PROJECT_DIR\"\n\ncd \"$PROJECT_DIR\"\n[ -f \"$HOME/.cargo/env\" ] && source \"$HOME/.cargo/env\"\n\nif [ \"$PLATFORM_NAME\" = \"iphoneos\" ]; then\n  RUST_TARGET=\"aarch64-apple-ios\"\nelif [ \"$PLATFORM_NAME\" = \"iphonesimulator\" ]; then\n  if [ \"${NATIVE_ARCH_ACTUAL:-$ARCHS}\" = \"arm64\" ]; then\n    RUST_TARGET=\"aarch64-apple-ios-sim\"\n  else\n    RUST_TARGET=\"x86_64-apple-ios\"\n  fi\nelse\n  echo \"Unsupported PLATFORM_NAME=$PLATFORM_NAME\"\n  exit 1\nfi\n\nif [ \"$CONFIGURATION\" = \"Release\" ]; then\n  PROFILE_FLAG=\"--release\"\n  PROFILE_DIR=\"release\"\nelse\n  PROFILE_FLAG=\"\"\n  PROFILE_DIR=\"debug\"\nfi\n\nexport CARGO_TARGET_DIR=\"$SRCROOT/target/xcode\"\ncargo build --bin phira-main --target \"$RUST_TARGET\" $PROFILE_FLAG --no-default-features --features webui\n\nmkdir -p \"$PROJECT_DIR/build\"\ncp \"$CARGO_TARGET_DIR/$RUST_TARGET/$PROFILE_DIR/phira-main\" \"$SRCROOT/build/phira-main\"\n";
+			shellScript = "set -euo pipefail\n\necho \"PROJECT_DIR=$PROJECT_DIR\"\n\ncd \"$PROJECT_DIR\"\n[ -f \"$HOME/.cargo/env\" ] && source \"$HOME/.cargo/env\"\n\nif [ \"$PLATFORM_NAME\" = \"iphoneos\" ]; then\n  RUST_TARGET=\"aarch64-apple-ios\"\nelif [ \"$PLATFORM_NAME\" = \"iphonesimulator\" ]; then\n  if [ \"${NATIVE_ARCH_ACTUAL:-$ARCHS}\" = \"arm64\" ]; then\n    RUST_TARGET=\"aarch64-apple-ios-sim\"\n  else\n    RUST_TARGET=\"x86_64-apple-ios\"\n  fi\nelse\n  echo \"Unsupported PLATFORM_NAME=$PLATFORM_NAME\"\n  exit 1\nfi\n\nif [ \"$CONFIGURATION\" = \"Release\" ]; then\n  PROFILE_FLAG=\"--release\"\n  PROFILE_DIR=\"release\"\nelse\n  PROFILE_FLAG=\"\"\n  PROFILE_DIR=\"debug\"\nfi\n\nexport CARGO_TARGET_DIR=\"$SRCROOT/target/xcode\"\n# video 需要 prpr-avc/static-lib/<target> 下的 FFmpeg 静态库（20260730_v0 起的包是真 iOS 对象）。\n# 没有该目标的库时自动降级为不带 video 构建（例如 Intel 模拟器的 x86_64-apple-ios 官方没发过包）。\nVIDEO_FLAG=\"\"\nif [ -d \"$PROJECT_DIR/prpr-avc/static-lib/$RUST_TARGET\" ]; then\n  VIDEO_FLAG=\"--features video\"\n  echo \"video: enabled ($RUST_TARGET)\"\nelse\n  echo \"video: disabled (missing static-lib/$RUST_TARGET)\"\nfi\ncargo build --bin phira-main --target \"$RUST_TARGET\" $PROFILE_FLAG --no-default-features $VIDEO_FLAG\n\nmkdir -p \"$PROJECT_DIR/build\"\ncp \"$CARGO_TARGET_DIR/$RUST_TARGET/$PROFILE_DIR/phira-main\" \"$SRCROOT/build/phira-main\"\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -199,7 +199,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 12.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -224,7 +224,7 @@
 				INFOPLIST_FILE = phira.app/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Phira Mod";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music-games";
-				IPHONEOS_DEPLOYMENT_TARGET = 12.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -294,7 +294,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 12.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -320,7 +320,7 @@
 				INFOPLIST_FILE = phira.app/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Phira Mod";
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music-games";
-				IPHONEOS_DEPLOYMENT_TARGET = 12.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 13.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",

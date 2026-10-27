@@ -1,0 +1,16 @@
+# 项目级覆盖：全局 CARGO_HOME 使用的 TUNA 源当前对本环境 403，
+# 独立 workspace 内仅对本工程的依赖走 rsproxy（其余沿用 cargo 全局其余配置）。
+[source.crates-io]
+replace-with = 'rsproxy'
+
+[source.rsproxy]
+registry = "sparse+https://rsproxy.cn/index/"
+
+# Build products moved outside D:\Phigros on purpose:
+# the 360 security suite (360AntiSteal / 360FsFlt minifilters) protects the
+# D:\Phigros tree and silently rejects cross-tree DLL loads for processes
+# started inside it, which killed cl.exe with "fatal error D8050 cannot
+# execute c1.dll" during bundled-sqlite compiles. D:\Environment is verified
+# clean for compile workloads, so the cargo target dir lives there.
+[build]
+target-dir = 'D:\Environment\build\bp-host-target'

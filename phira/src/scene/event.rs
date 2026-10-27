@@ -12,7 +12,7 @@ use chrono::Utc;
 use macroquad::prelude::*;
 use prpr::{
     core::Tweenable,
-    ext::{open_url, semi_black, semi_white, RectExt, SafeTexture, ScaleType},
+    ext::{open_url, semi_black, RectExt, SafeTexture, ScaleType},
     scene::{show_error, NextScene, Scene},
     task::Task,
     time::TimeManager,
@@ -455,7 +455,8 @@ impl Scene for EventScene {
                 .pos(0., top - 0.03)
                 .anchor(0.5, 1.)
                 .size(0.4)
-                .color(semi_white((((elapsed - 2.) * 1.5 - std::f32::consts::FRAC_PI_2).sin() + 1.) / 2.))
+                // 提示语压在活动插图上（恒深）→ 写死白，不能走主题墨色
+                .color(Color::new(1., 1., 1., (((elapsed - 2.) * 1.5 - std::f32::consts::FRAC_PI_2).sin() + 1.) / 2.))
                 .draw();
         }
 

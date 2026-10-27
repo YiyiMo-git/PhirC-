@@ -416,7 +416,9 @@ impl MPPanel {
                         content: format!("{}：{content}", client.user_name(user)),
                         y: 0.,
                         bottom: 0.,
-                        color: WHITE,
+                        // 消息列表画在 `ui.background()` 面板上（浅色主题下是白底）
+                        // → 文字必须跟主题墨色，写死 `WHITE` 在浅色主题下就是白字白底。
+                        color: prpr::ui::theme::ink(1.),
                     },
                     msg => {
                         let content = match msg {

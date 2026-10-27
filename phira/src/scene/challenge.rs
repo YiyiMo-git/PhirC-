@@ -36,6 +36,8 @@ pub struct ChallengeScene {
     charts: [ChartItem; 3],
     progress: ChallengeProgress,
     phase: Phase,
+    /// 曲间黑场过渡的起始时刻（`TimeManager::real_time()`）；None = 没有过渡。
+    transition: Option<f64>,
     waiting: bool,
     loading: LocalTask<Result<LoadingScene>>,
     fetch: Option<Task<Result<Arc<Chart>>>>,
@@ -55,6 +57,7 @@ impl ChallengeScene {
             charts,
             progress: ChallengeProgress::default(),
             phase: Phase::Playing,
+            transition: None,
             waiting: false,
             loading: None,
             fetch: None,
@@ -273,7 +276,7 @@ impl Scene for ChallengeScene {
         self.target = target;
         Ok(())
     }
-    fn on_result(&mut self, _tm: &mut TimeManager, result: Box<dyn Any>) -> Result<()> {
+    fn on_result(&mut self, tm: &mut TimeManager, result: Box<dyn Any>) -> Result<()> {
         self.waiting = false;
         let result = match result.downcast::<ChallengeEvent>() {
             Ok(event) => {
@@ -301,6 +304,10 @@ impl Scene for ChallengeScene {
                         });
                         if self.progress.index() == 3 {
                             self.phase = Phase::Results;
+                        } else {
+                            // 曲间黑场过渡：三首连打之间插一段淡入淡出的黑场，
+                            // 避免上一首的结算画面直接硬切到下一首的加载页。
+                            self.transition = Some(tm.real_time());
                         }
                     }
                     ChallengeEvent::Restart => self.restart(),
@@ -430,6 +437,22 @@ impl Scene for ChallengeScene {
             }
             Phase::Results => self.render_results(ui, t),
             Phase::Badges => self.render_badges(ui, t),
+        }
+        // 曲间黑场：0 → 0.22s 压黑，0.22 → 0.34s 保持，0.34 → 0.58s 淡出
+        if let Some(start) = self.transition {
+            let elapsed = (tm.real_time() - start) as f32;
+            if elapsed >= 0.58 {
+                self.transition = None;
+            } else {
+                let alpha = if elapsed < 0.22 {
+                    elapsed / 0.22
+                } else if elapsed < 0.34 {
+                    1.
+                } else {
+                    ((0.58 - elapsed) / 0.24).clamp(0., 1.)
+                };
+                ui.fill_rect(ui.screen_rect(), Color::new(0., 0., 0., alpha));
+            }
         }
         if let Some(download) = &mut self.download {
             download.render(ui, t);

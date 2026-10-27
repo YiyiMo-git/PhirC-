@@ -144,7 +144,9 @@ impl Page for OffsetPage {
     fn render(&mut self, ui: &mut Ui, s: &mut SharedState) -> Result<()> {
         let t = s.t;
         s.render_fader(ui, |ui| {
-            // kaichang 玻璃语言：校准区 = 磨砂玻璃面板（浅色主题下深色字）
+            // kaichang 玻璃语言：校准区 = 磨砂玻璃卡片（浅色主题下深色字）
+            // 用 `glass_card` 而不是裸 `acrylic`：多出 1px 浅描边 + 一圈柔和投影，
+            // 和设置页 / 曲库 / 消息页的卡片完全同款（都是同一套基建）。
             let m = crate::newui::Metrics::new(ui);
             let th = crate::newui::theme();
             // 活动栏删除后左缘可以直接贴到 content_rect 的 -0.94（原来 -0.92 是为了躲栏）
@@ -152,7 +154,7 @@ impl Page for OffsetPage {
             let mut r = ui.content_rect();
             r.w += r.x - lf;
             r.x = lf;
-            crate::newui::acrylic(ui, r, m.u(16.), &th);
+            crate::newui::glass_card(ui, r, m.u(16.), &th, 0.);
             // 面板标题：带字距 + 弱化副标题（与开始页/其他页一致的层级）
             crate::newui::page_title(
                 ui,

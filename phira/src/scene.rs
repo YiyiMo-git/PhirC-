@@ -6,6 +6,9 @@ pub use chart_order::ChartOrder;
 mod challenge;
 pub use challenge::ChallengeScene;
 
+mod dan;
+pub use dan::DanScene;
+
 mod chapter;
 pub use chapter::ChapterScene;
 
@@ -15,6 +18,7 @@ pub use event::EventScene;
 mod main;
 pub use main::{MainScene, BGM_VOLUME_UPDATED, MP_PANEL};
 
+pub mod replay;
 mod song;
 pub use song::{compress_folder, Downloading, SongScene, RECORD_ID};
 #[cfg(feature = "video")]
@@ -266,6 +270,22 @@ pub fn dispatch_tos_task() -> Option<bool> {
     None
 }
 /// use the return value to add a loading screen
+/// WebView 曲库页用的**只读**判断：在线功能所需的「服务条款」是否已通过。
+///
+/// ⚠️ 不弹窗、不写盘 —— 所以可以从 WebView 的 IPC 线程调用。
+/// （真正的弹窗流程必须走 `check_read_tos_and_policy`，且只能在主线程跑。）
+pub fn tos_ok_for_online() -> bool {
+    get_data().terms_modified.is_some() || TOS_VERIFIED.load(Ordering::Relaxed)
+}
+
+/// 条款文本是否已经拉到本地。
+///
+/// `check_read_tos_and_policy` 只有在 `TERMS` 已就绪时才会真的弹窗；否则它只是
+/// 启动一次后台拉取然后返回 false —— 所以调用方要**反复重试**直到这里变 true。
+pub fn tos_terms_loaded() -> bool {
+    matches!(TERMS.get(), Some(Some(_)))
+}
+
 pub fn load_tos_and_policy(show_loading: bool) {
     if TERMS.get().is_some() {
         return;
@@ -312,6 +332,9 @@ pub fn parse_warnings_to_string(w: &ParseWarnings) -> Option<String> {
     if w.has_attach_ui {
         warnings.push(format!("- {}", itl!("warning-attach-ui")));
     }
+    if w.has_rpen_features {
+        warnings.push(itl!("warning-rpen-features").into_owned());
+    }
     if warnings.is_empty() {
         None
     } else {
@@ -335,7 +358,9 @@ pub async fn import_chart_to(dir: &Path, local_path: String, file: File) -> Resu
     let mut fs = fs_from_path(&local_path)?;
     let mut info = fs::load_info(fs.as_mut()).await.with_context(|| itl!("info-fail"))?;
     fs::fix_info(fs.as_mut(), &mut info).await.with_context(|| itl!("invalid-chart"))?;
-    let warnings = if info.use_rpe_170_speed.is_none() || info.use_attach_ui_fix.is_none() {
+    // 任一侧还是「未指定」就要跑一次 lint（RPEN 的探测也在这里面），最多跑一次。
+    let need_lint = info.use_rpe_170_speed.is_none() || info.use_attach_ui_fix.is_none() || info.use_rpen.is_none();
+    let warnings = if need_lint {
         if info.use_attach_ui_fix.is_none() {
             info.use_attach_ui_fix = Some(true);
         }
@@ -343,6 +368,10 @@ pub async fn import_chart_to(dir: &Path, local_path: String, file: File) -> Resu
     } else {
         ParseWarnings::default()
     };
+    // RPEN 警告对每次导入都生效（包括自带 info.yml 的包）：只要还没定过，就按探测结果落默认值。
+    if info.use_rpen.is_none() {
+        info.use_rpen = Some(warnings.has_rpen_features);
+    }
     dir.create("info.yml")?.write_all(serde_yaml::to_string(&info)?.as_bytes())?;
     Ok((
         LocalChart {

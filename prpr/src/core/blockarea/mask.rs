@@ -4,6 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use super::Zone;
 use once_cell::sync::Lazy;
 
+#[path = "next_mask.rs"]
+mod next;
+
 static DISPLACE: Lazy<image::RgbImage> = Lazy::new(|| {
     let source = image::load_from_memory(include_bytes!("../../../../assets/blockarea/BlockNoise1.png"))
         .unwrap()
@@ -27,10 +30,16 @@ pub(super) struct Masks {
     last_dim: (usize, usize, f32),
     last_zones: Vec<Zone>,
     last_time: Option<f32>,
-    layers: [Vec<u8>; 6],
+    pub(super) layers: [Vec<u8>; 6],
     ready_green: Vec<u8>,
     gray_ping: Vec<u8>,
     gray_pong: Vec<u8>,
+    /// RPEN 新格式噪区的 `single` 反转规则（`None` = 上一次跑的是旧噪区）。
+    next_single: Option<bool>,
+    next_last_dim: (usize, usize, f32),
+    next_last_zones: Vec<Zone>,
+    next_last_time: Option<f32>,
+    next_coverage: next::Coverage,
 }
 
 /// 默认遮罩分辨率除数：多少个屏幕像素合成一格掩码。
@@ -55,6 +64,13 @@ pub const MAX_MASK_DIVISOR: usize = 8;
 /// 不希望为此去加锁或把配置穿透到 `Resource`。
 static MASK_DIVISOR: AtomicUsize = AtomicUsize::new(DEFAULT_MASK_DIVISOR);
 
+/// 低性能模式：掩码更粗 + 跳过触摸 pass（见 `shader.rs` 的绘制路径）。
+static LOW_PERFORMANCE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 低性能档的除数。**故意比 `MAX_MASK_DIVISOR`（8 = 官方原生）更粗** ——
+/// 这一档就是拿边缘精细度换帧率；pro.11 的 `low_performance` 同样取 12。
+const LOW_PERFORMANCE_DIVISOR: usize = 12;
+
 /// 设置遮罩分辨率除数（由 `phira` 的噪区精细度滑块 / 存档加载调用）。
 ///
 /// 夹在 `1..=32`：0 会让掩码退化成 1 格，过大则噪区几乎看不见。
@@ -67,9 +83,32 @@ pub fn mask_divisor() -> usize {
     MASK_DIVISOR.load(Ordering::Relaxed)
 }
 
+/// 设置低性能模式。
+pub fn set_low_performance(low: bool) {
+    LOW_PERFORMANCE.store(low, Ordering::Relaxed);
+}
+
+/// 当前是否低性能模式。
+pub fn low_performance() -> bool {
+    LOW_PERFORMANCE.load(Ordering::Relaxed)
+}
+
+/// **实际生效**的除数：低性能模式下取 `max(用户设定, 12)`。
+///
+/// `render_displaced` 走这个而不是 [`mask_divisor`]。
+pub(super) fn effective_mask_divisor() -> usize {
+    let divisor = mask_divisor();
+    if low_performance() {
+        divisor.max(LOW_PERFORMANCE_DIVISOR)
+    } else {
+        divisor
+    }
+}
+
 impl Masks {
     pub fn render_displaced(&mut self, width: usize, height: usize, aspect: f32, zones: &[Zone], time: f32) {
-        let (bw, bh) = ((width / mask_divisor()).max(1), (height / mask_divisor()).max(1));
+        let divisor = effective_mask_divisor();
+        let (bw, bh) = ((width / divisor).max(1), (height / divisor).max(1));
         let (ew, eh) = (bw * 2, bh * 2);
         if self.last_dim == (ew, eh, aspect) && self.last_zones == zones && self.last_time == Some(time) {
             return;
@@ -160,6 +199,64 @@ impl Masks {
         self.last_time = Some(time);
     }
 
+    /// RPEN 新格式（rpe-next）分层噪区：布尔覆盖掩码 + `single` 反转规则，
+    /// 之后复用与旧噪区完全相同的位移 / 边缘 / 辉光构建。
+    pub fn render_next(&mut self, width: usize, height: usize, aspect: f32, zones: &[Zone], time: f32, single: bool) {
+        let divisor = effective_mask_divisor();
+        let (bw, bh) = ((width / divisor).max(1), (height / divisor).max(1));
+        let (ew, eh) = (bw * 2, bh * 2);
+        let same = self.next_single == Some(single)
+            && self.next_last_dim == (ew, eh, aspect)
+            && self.next_last_zones.len() == zones.len()
+            && self.next_last_zones.iter().zip(zones).all(|(a, b)| a.same_mask(b));
+        if same && self.next_last_time == Some(time) {
+            return;
+        }
+        if !same {
+            self.next_single = Some(single);
+            self.next_last_dim = (ew, eh, aspect);
+            self.next_last_zones.clear();
+            self.next_last_zones.extend_from_slice(zones);
+            self.next_coverage.raster(bw, bh, aspect, zones, single);
+        }
+        self.width = ew;
+        self.height = eh;
+        self.rgba.resize(ew * eh * 4, 0);
+        self.rgba.fill(0);
+        self.aux_rgba.resize(ew * eh * 4, 0);
+        self.aux_rgba.fill(0);
+        let stride = ew.div_ceil(64);
+        self.active.resize(stride * eh, 0);
+        self.active.fill(0);
+        for y in 0..bh {
+            for x in 0..bw {
+                let i = y * bw + x;
+                let uv = [(x as f32 + 0.5) / bw as f32, (y as f32 + 0.5) / bh as f32];
+                let duv = compose_uv(uv, time);
+                let sx = (duv[0] * bw as f32).floor().clamp(0., (bw - 1) as f32) as usize;
+                let sy = (duv[1] * bh as f32).floor().clamp(0., (bh - 1) as f32) as usize;
+                let mask = self.next_coverage.active[sy * bw + sx];
+                let disabled = self.next_coverage.disabled[i];
+                let ready = self.next_coverage.ready[i];
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let (xx, yy) = (x * 2 + dx, y * 2 + dy);
+                        let dst = (yy * ew + xx) * 4;
+                        self.rgba[dst] = mask;
+                        self.rgba[dst + 3] = disabled;
+                        self.aux_rgba[dst] = ready;
+                        self.aux_rgba[dst + 2] = disabled;
+                        if mask != 0 {
+                            self.active[yy * stride + xx / 64] |= 1 << (xx % 64);
+                        }
+                    }
+                }
+            }
+        }
+        self.render_rings();
+        self.next_last_time = Some(time);
+    }
+
     fn render_rings(&mut self) {
         let (width, height) = (self.width, self.height);
         if self.rgba.chunks_exact(4).any(|p| p[0] != 0 && p[0] != 255) {
@@ -239,6 +336,33 @@ fn unorm(v: f32) -> u8 {
     (v.clamp(0., 1.) * 255.).round() as u8
 }
 
+impl Masks {
+    /// 这个像素的颜色该归哪一侧：Some(true) = 反转块（subtract）占上风，
+    /// Some(false) = 普通块，None = 两侧打平（该像素没有归属）。
+    ///
+    /// 逐字照搬 pro.11 的 block_mask.rs。六相机层布局一致：
+    /// layers[layer*2] = 普通、layers[layer*2+1] = 反转；
+    /// layer 0 = 激活、1 = 未激活（含 ready）。
+    /// 只有**在原生合成里存活下来的那一侧**才有资格贡献颜色 ——
+    /// 被抵消掉的矩形不该把 tint 泄进洞里和边界外。
+    pub(super) fn color_source(&self, layer: usize, pixel: usize) -> Option<bool> {
+        // 用 `.get` 而不是直接索引：`render_displaced` 之前掩码是空的（各层长度 0），
+        // 而这个函数可能被更早的路径调到。直接索引会 panic。
+        let at = |i: usize| self.layers.get(i).and_then(|l| l.get(pixel)).copied().unwrap_or(0);
+        let normal = at(layer * 2);
+        let subtract = at(layer * 2 + 1);
+        let inverse = if layer == 0 {
+            // 阈值窗（23..=30）而不是奇偶 —— 和 subtract_enabled 同一套。
+            if (23..=30).contains(&subtract) { 255 } else { 0 }
+        } else {
+            let green = self.raw_disabled_green.get(pixel).copied().unwrap_or(0);
+            let (r, g) = subtract_disabled(subtract, green);
+            unorm(r * g)
+        };
+        (normal != inverse).then_some(normal < inverse)
+    }
+}
+
 fn subtract_enabled(red: u8) -> f32 {
     // Native SubtractBlockBlender pass 0: a threshold window, not parity.
     let r = red as f32 / 255.;
@@ -288,18 +412,80 @@ fn noise(uv: [f32; 2]) -> f32 {
     DISPLACE.get_pixel(mirror(uv[0], DISPLACE.width()), mirror(uv[1], DISPLACE.height()))[0] as f32 / 255.
 }
 
-fn raster_rows(width: usize, height: usize, aspect: f32, zone: &Zone, mut write: impl FnMut(usize, usize, usize)) {
+pub(super) fn raster_rows(width: usize, height: usize, aspect: f32, zone: &Zone, mut write: impl FnMut(usize, usize, usize)) {
+    if let Some(m) = &zone.projection {
+        let (s, c) = zone.angle.sin_cos();
+        let mut poly = vec![(-1., -1.), (1., -1.), (1., 1.), (-1., 1.)]
+            .into_iter()
+            .map(|(x, y)| {
+                let x = x * zone.half.x;
+                let y = y * zone.half.y;
+                m * nalgebra::Vector3::new(zone.center.x + c * x - s * y, zone.center.y + (s * x + c * y) * zone.y_scale, 1.)
+            })
+            .collect::<Vec<_>>();
+        // 深度必须在投影相机的可视区间内；相机后方的顶点会在这里被裁掉。
+        for (boundary, sign) in [(0.001, 1.), (150., -1.)] {
+            let mut next = Vec::new();
+            for i in 0..poly.len() {
+                let a = poly[i];
+                let b = poly[(i + 1) % poly.len()];
+                let da = (a.z - boundary) * sign;
+                let db = (b.z - boundary) * sign;
+                if da >= 0. {
+                    next.push(a)
+                }
+                if (da >= 0.) != (db >= 0.) {
+                    next.push(a + (b - a) * (da / (da - db)));
+                }
+            }
+            poly = next;
+        }
+        if poly.len() < 3 {
+            return;
+        }
+        let points: Vec<_> = poly
+            .iter()
+            .map(|p| ((p.x / p.z + 1.) * width as f32 / 2., (p.y / p.z * aspect + 1.) * height as f32 / 2.))
+            .collect();
+        let low = points.iter().map(|p| p.1).fold(f32::INFINITY, f32::min).ceil().clamp(0., height as f32) as usize;
+        let high = points
+            .iter()
+            .map(|p| p.1)
+            .fold(f32::NEG_INFINITY, f32::max)
+            .ceil()
+            .clamp(0., height as f32) as usize;
+        for y in low..high {
+            let py = y as f32 + 0.5;
+            let mut xs = Vec::new();
+            for i in 0..points.len() {
+                let a = points[i];
+                let b = points[(i + 1) % points.len()];
+                if (a.1 <= py && b.1 > py) || (b.1 <= py && a.1 > py) {
+                    xs.push(a.0 + (b.0 - a.0) * (py - a.1) / (b.1 - a.1));
+                }
+            }
+            xs.sort_by(f32::total_cmp);
+            if let (Some(a), Some(b)) = (xs.first(), xs.last()) {
+                let a = (a - 0.5).ceil().clamp(0., width as f32) as usize;
+                let b = (b - 0.5).ceil().clamp(0., width as f32) as usize;
+                if a < b {
+                    write(y, a, b);
+                }
+            }
+        }
+        return;
+    }
     if zone.half.x <= 0. || zone.half.y <= 0. {
         return;
     }
     let (s, c) = zone.angle.sin_cos();
-    let y_half = s.abs() * zone.half.x + c.abs() * zone.half.y;
+    let y_half = (s.abs() * zone.half.x + c.abs() * zone.half.y) * zone.y_scale;
     let start = (((zone.center.y - y_half) * aspect + 1.) * height as f32 * 0.5 - 0.5)
         .ceil()
         .clamp(0., height as f32) as usize;
     let end = ((((zone.center.y + y_half) * aspect + 1.) * height as f32 * 0.5 - 0.5).floor() + 1.).clamp(0., height as f32) as usize;
     for y in start..end {
-        let dy = ((y as f32 + 0.5) * 2. / height as f32 - 1.) / aspect - zone.center.y;
+        let dy = (((y as f32 + 0.5) * 2. / height as f32 - 1.) / aspect - zone.center.y) / zone.y_scale;
         let (mut lo, mut hi) = (-1.0_f32, 1.0_f32);
         for (a, b, half) in [(c, s * dy, zone.half.x), (-s, c * dy, zone.half.y)] {
             if a.abs() < 1e-7 {
@@ -344,7 +530,7 @@ fn dilate(source: &[u64], dest: &mut [u64], width: usize, height: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::Vector;
+    use crate::core::{Vector, DEFAULT_BLOCK_COLOR};
 
     #[test]
     fn compose_uses_native_mediump_intermediate_rounding() {
@@ -356,6 +542,10 @@ mod tests {
 
     fn zone(x: f32, y: f32, half_x: f32, half_y: f32, angle: f32, invert: bool) -> Zone {
         Zone {
+            projection: None,
+            line2area: false,
+            y_scale: 1.,
+            color: DEFAULT_BLOCK_COLOR,
             center: Vector::new(x, y),
             half: Vector::new(half_x, half_y),
             angle,
@@ -493,6 +683,7 @@ mod tests {
     fn disabled_subtract_does_not_clip_enabled_region() {
         let active = zone(0., 0., 0.5, 0.25, 0., false);
         let disabled = Zone {
+            color: DEFAULT_BLOCK_COLOR,
             active: false,
             invert: true,
             ..active.clone()
@@ -523,10 +714,12 @@ mod tests {
     #[ignore = "校验的是官方原生 1/8 掩码分辨率；本分支刻意用 mask_divisor()=4 \n                换取更精细的边缘，故该原生分辨率断言不适用（用例保留作基线记录）"]
     fn ready_inputs_use_ready_only_cameras_and_disabled_compose() {
         let disabled = Zone {
+            color: DEFAULT_BLOCK_COLOR,
             active: false,
             ..zone(-0.5, 0., 0.2, 0.2, 0., false)
         };
         let ready = Zone {
+            color: DEFAULT_BLOCK_COLOR,
             active: false,
             ready: true,
             ..zone(0.5, 0., 0.2, 0.2, 0., false)
@@ -542,6 +735,7 @@ mod tests {
     fn compose_displacement_animates_only_enabled_masks_and_uses_red_channel() {
         let active = zone(0., 0., 0.5, 0.2, 0., false);
         let disabled = Zone {
+            color: DEFAULT_BLOCK_COLOR,
             active: false,
             ..active.clone()
         };
@@ -559,6 +753,7 @@ mod tests {
     #[test]
     fn initial_subtract_show_fades_green_while_alpha_stays_point_one() {
         let sub = Zone {
+            color: DEFAULT_BLOCK_COLOR,
             active: false,
             opacity: 0.25,
             ..zone(0., 0., 1., 1., 0., true)

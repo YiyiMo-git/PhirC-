@@ -1,0 +1,119 @@
+<!doctype html>
+<!--
+  wireframe-result.html —— BP 结果 / 分享卡线框（handoff 任务#7）
+  布局：顶部导出图片/复制链接；上半双方 Ban/Pick 列表 + 干扰摘要（卡片分区）；
+        下半阶段进度与排行榜（选手色条 + 数值）。
+  数据结构对应 net/protocol.rs 的 BpResult（bans/picks/availableCharts/interferenceLog）。
+  视觉值全部来自 design-tokens.css。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>bp-host 线框 · 结果 / 分享卡</title>
+<link rel="stylesheet" href="./design-tokens.css">
+<link rel="stylesheet" href="./wireframe.css">
+<style>
+  .result-wrap {
+    width: min(480px, 100%);
+    margin: 0 auto;
+    min-height: var(--dvh);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-4);
+    padding: var(--sp-4) var(--sp-4) calc(var(--sp-6) + var(--safe-bottom));
+  }
+  .op-list { display: grid; gap: var(--sp-2); }
+  .op-row {
+    display: flex; align-items: center; gap: var(--sp-3);
+    padding: var(--sp-2) 0; border-top: 1px solid var(--border-subtle);
+  }
+  .op-row .order {
+    min-width: calc(var(--sp-6) * 1.4);
+    font-size: var(--fz-2xs); color: var(--text-tertiary);
+    font-variant-numeric: tabular-nums;
+  }
+  .stage-steps { display: flex; gap: var(--sp-2); margin-top: var(--sp-2); }
+  .stage-step {
+    flex: 1; text-align: center;
+    padding: var(--sp-2); border-radius: var(--r-md);
+    border: 1px solid var(--border-subtle);
+    font-size: var(--fz-xs); color: var(--text-secondary);
+    background: var(--surface-sunken);
+  }
+  .stage-step[A] { border-color: var(--side-a); color: var(--side-a); background: transparent; }
+  .stage-step[B] { border-color: var(--side-b); color: var(--side-b); background: transparent; }
+</style>
+</head>
+<body>
+<div class="app-shell">
+  <!-- 顶栏：导出动作 -->
+  <header class="app-top">
+    <strong style="font-size: var(--fz-lg)">BP 结果</strong>
+    <span class="badge">131400 · 场次 #1</span>
+    <span style="flex: 1"></span>
+    <button class="btn">导出图片</button>
+    <button class="btn" variant="primary">复制分享链接</button>
+  </header>
+
+  <div class="result-wrap">
+    <!-- 上半：双方 Ban/Pick 列表 + 干扰摘要 -->
+    <article class="card">
+      <h2 class="card-title">时间线（Ban / Pick）</h2>
+      <p class="card-subtitle">顺序号 order_no 为全局自增，与主机侧操作记录一致。</p>
+      <div class="op-list" style="margin-top: var(--sp-3)">
+        <div class="op-row"><span class="order">#1 · 14:00:40</span><span class="badge" A-side>A</span><span class="badge" sem="ban">Ban</span>《Signal》<span style="flex:1"></span><span class="badge" sem="pick">空 Ban 占位清除</span></div>
+        <div class="op-row"><span class="order">#2 · 14:01:22</span><span class="badge" B-side>B</span><span class="badge" sem="ban">Ban</span>《Ivy》<span style="flex:1"></span></div>
+        <div class="op-row"><span class="order">#3 · 14:02:10</span><span class="badge" A-side>A</span><span class="badge" sem="pick">Pick</span>《Lyrith》<span style="flex:1"></span><span class="badge">最终可用 4 曲</span></div>
+        <div class="op-row"><span class="order">#4 · 14:02:48</span><span class="badge" B-side>B</span><span class="badge" sem="pick">Pick</span>《Re end of a dream》<span style="flex:1"></span></div>
+      </div>
+    </article>
+
+    <article class="card">
+      <div style="display: flex; align-items: baseline; justify-content: space-between">
+        <h2 class="card-title">干扰摘要</h2>
+        <span class="badge" sem="interference">共 3 次 · 反制 1</span>
+      </div>
+      <div class="timeline" style="margin-top: var(--sp-3)">
+        <div class="tl-item" sem="interference"><i class="tl-dot"></i>A → B「压缩倒计时」−8s · 已生效<span style="flex:1"></span>#1</div>
+        <div class="tl-item" sem="interference"><i class="tl-dot"></i>B → A「遮蔽曲池」×2 · <span class="badge" sem="interference">已反制</span><span style="flex:1"></span>#2</div>
+        <div class="tl-item" sem="interference"><i class="tl-dot"></i>A → B「追加 Ban 压力」强制位《Force》· 已回滚<span style="flex:1"></span>#3</div>
+      </div>
+    </article>
+
+    <!-- 下半：阶段进度 + 排行榜（选手色条 + 数值） -->
+    <article class="card">
+      <h2 class="card-title">阶段进度 bppp</h2>
+      <div class="stage-steps">
+        <div class="stage-step" A>b · A Ban</div>
+        <div class="stage-step" A>· · B Ban</div>
+        <div class="stage-step">p · 双方 Pick</div>
+        <div class="stage-step">p · 第二轮 Pick</div>
+      </div>
+    </article>
+
+    <article class="card">
+      <h2 class="card-title">排行榜（选手色条 + 数值）</h2>
+      <div style="display: grid; gap: var(--sp-3); margin-top: var(--sp-3)">
+        <div class="leader-row">
+          <span class="badge" A-side>A</span><strong>A 哥</strong>
+          <span class="leader-bar" style="--leader-rest: 30%; --leader-tone: var(--side-a);"><i></i></span>
+          <strong>740</strong>
+        </div>
+        <div class="leader-row">
+          <span class="badge" B-side>B</span><strong>B 酱</strong>
+          <span class="leader-bar" style="--leader-rest: 46%; --leader-tone: var(--side-b);"><i></i></span>
+          <strong>612</strong>
+        </div>
+        <div class="leader-row">
+          <span class="badge" role="spectator">观</span>解说镜头
+          <span class="leader-bar" style="--leader-rest: 88%; --leader-tone: var(--spectator-muted);"><i></i></span>
+          <span class="card-subtitle" style="margin: 0">—</span>
+        </div>
+      </div>
+      <p class="card-subtitle" style="margin-top: var(--sp-3)">数值滚动演示见 result-share 联动（实际渲染走数值 rAF 插值，色条只来自令牌）。</p>
+    </article>
+  </div>
+</div>
+</body>
+</html>

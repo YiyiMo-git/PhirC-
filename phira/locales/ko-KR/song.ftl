@@ -35,6 +35,7 @@ edit-saving = 저장 중
 edit-load-file-failed = 외부 파일 불러오기 실패
 edit-save-failed = 저장 실패
 edit-saved = 저장 완료
+replay-finished = 리플레이 재생이 종료되었습니다
 edit-preview-invalid = 미리보기 시간이 범위를 벗어났습니다.
 edit-tags = 태그 편집
 edit-downloaded = 다운로드된 비트맵은 편집할 수 없습니다.

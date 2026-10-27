@@ -135,62 +135,10 @@ impl HealthBarColor {
     }
 }
 
-/// 「音符映射」的目标类型：把某一类音符整体改成哪一类。
-///
-/// 术语按社区习惯：蓝键 = Tap（`Click`），黄键 = Drag，红键 = Flick，长条 = Hold。
-#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, Debug)]
-#[serde(rename_all = "camelCase")]
-pub enum NoteMapTarget {
-    /// 保持不变（默认）。
-    #[default]
-    Keep,
-    /// 蓝键（Tap / `Click`）。
-    Tap,
-    /// 黄键（Drag）。
-    Drag,
-    /// 红键（Flick）。
-    Flick,
-    /// 长条（Hold）；新长条的时长见 [`Config::note_map_hold_ms`]。
-    Hold,
-}
+#[path = "../../sensitive/mods/note_map.rs"]
+mod note_map_mod;
+pub use note_map_mod::{NoteMap, NoteMapTarget};
 
-impl NoteMapTarget {
-    /// 可选值顺序（设置页点一下换下一个）。
-    pub const ALL: [Self; 5] = [Self::Keep, Self::Tap, Self::Drag, Self::Flick, Self::Hold];
-
-    /// 下一个目标类型（循环）。
-    pub fn next(self) -> Self {
-        let idx = Self::ALL.iter().position(|it| *it == self).unwrap_or(0);
-        Self::ALL[(idx + 1) % Self::ALL.len()]
-    }
-}
-
-/// 音符映射表：四类源音符各自被改成哪一类目标音符。
-///
-/// 例如「所有红键改成蓝键」= `flick: NoteMapTarget::Tap`，其余保持默认。
-/// 默认全 [`NoteMapTarget::Keep`] = 完全不改谱面。
-#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct NoteMap {
-    /// 源：蓝键（Tap / `Click`）。
-    pub tap: NoteMapTarget,
-    /// 源：黄键（Drag）。
-    pub drag: NoteMapTarget,
-    /// 源：红键（Flick）。
-    pub flick: NoteMapTarget,
-    /// 源：长条（Hold）。
-    pub hold: NoteMapTarget,
-}
-
-impl NoteMap {
-    /// 是否完全没有改动（四项都是 `Keep`）。
-    ///
-    /// 为真时整条映射链路（遍历全谱音符 + 重建判定线缓存）可以直接跳过。
-    #[inline]
-    pub fn is_identity(&self) -> bool {
-        *self == Self::default()
-    }
-}
 
 /// 判定文字（PERFECT / GOOD / BAD / MISS）的出现动画样式。
 #[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, Debug)]
@@ -526,6 +474,9 @@ pub struct Config {
     /// 红键保护：点击（蓝键）不会被叠在附近的 Flick（红键）吃掉。
     pub flick_protect: bool,
     pub fullscreen_mode: bool,
+    /// 希望的刷新率（Hz）。仅移动端生效（Android 走 JNI 投票）。
+    /// 0 表示跟随系统 —— 但 Java 侧只接受固定档位，所以实际取值是 60/120/144/... 之一。
+    pub preferred_refresh_rate: u16,
     pub fxaa: bool,
     pub interactive: bool,
     /// Half of the `Perfect` judgement window, in milliseconds. `Good` and `Bad`
@@ -720,8 +671,17 @@ pub struct Config {
     /// → 面板采样）。`false` 走原来的零状态磨砂配方（柔光 + 半透明底 + 高光 + 颗粒），
     /// 完全不碰全局渲染状态。`true` 时若 RT/着色器不可用会自动回退到磨砂配方。
     pub ui_backdrop_blur: bool,
-    /// 噪区精细度：掩码分辨率除数（1 最细 / 8 最省性能）。见 `blockarea::set_mask_divisor`。
+    /// 噪区精细度：掩码分辨率除数（**2 最细 / 8 最省性能**，默认 8 = 官方原生）。
+    /// 见 `blockarea::set_mask_divisor`。
+    ///
+    /// 默认 8 而不是更细：这三趟 pass（mask / EdgeMask / GlowMask）是 CPU 逐像素算的，
+    /// 比 8 更细会让每帧的 CPU 缓冲 + 纹理上传成倍上涨（除数 2 ≈ 16.6 MB/帧 @1080p），
+    /// 掉帧非常明显。对照 PhiraiAd：等价实现全在 GPU，基准除数同样是 8。
     pub block_mask_divisor: usize,
+    /// 噪区**低性能模式**：掩码更粗（除数 12）+ 跳过触摸高亮 pass，
+    /// 噪区开销约降到 1/4。只在噪区卡顿时打开。
+    /// 见 `blockarea::set_low_performance`。
+    pub block_area_low_performance: bool,
 
     /// New UI 开始界面：透视视差是否跟随**陀螺仪 / 设备姿态**。
     /// 关掉 = 固定视角（只有设计稿那套静态透视）。桌面端没有姿态传感器时，
@@ -729,6 +689,28 @@ pub struct Config {
     pub gyro_parallax: bool,
     /// 陀螺仪视差的幅度倍率（0 = 不动，1 = 设计稿原值）。
     pub gyro_scale: f32,
+    /// 剧情编辑器（`kaichang/PhigrOS.html`）的工程快照。
+    ///
+    /// 页面通过 `phirc.setConfig({ story: "<json>" })` 回写，随 data.json 一起存档，
+    /// 这样在游戏 WebView 里跨会话不丢；空串表示还没存过。
+    pub story: String,
+    /// 全局着色器：设置里选的引擎内置预设名（`Effect::get_preset`）；空串 = 关闭。
+    /// 对所有谱面生效、叠加在谱面自带 shader 之上；NO_SHADER mod 仍能整体关掉。
+    pub global_shader: String,
+    /// 时间倒流可用次数（0 = 关闭）。游戏内「倒流」按钮消耗，段位考核强制 0。
+    pub rewind_count: u32,
+    /// 离线渲染专用：背景额外压暗 0.5（对齐 Phi Recorder 的 `render_bg_dim`）。
+    /// 正常游玩保持 false，不影响手感。
+    pub render_bg_dim: bool,
+    /// 保留帧缓冲（Phi Recorder 的 `preserve_framebuffer`）：
+    /// 不清屏，靠每帧压暗上一帧产生连续残影（替代离散拖影算法）。
+    pub preserve_framebuffer: bool,
+    /// 保留帧缓冲时的每帧淡出系数（0.05~1，越大残影越短）。
+    pub render_fade: f32,
+    /// 离线渲染专用：开场时长（秒）。0 = 用默认 `GameScene::BEFORE_TIME`（0.7）。
+    /// Phi Recorder（phire）的 `BEFORE_DURATION = 1.2`，且淡入是线性的；
+    /// 设成 >0 时同时切换成线性淡入，正常游玩不受影响。
+    pub render_intro_secs: f64,
 
     // for compatibility
     autoplay: Option<bool>,
@@ -833,6 +815,7 @@ impl Default for Config {
 
             offline_mode: false,
             fullscreen_mode: false,
+            preferred_refresh_rate: 120,
             offset: 0.,
             particle: true,
             player_name: "Mivik".to_string(),
@@ -850,11 +833,22 @@ impl Default for Config {
             volume_sfx: 1.,
             volume_bgm: 1.,
 
-            ui_dark: true,
+            // 默认**浅色**：2026-10-09 界面改成 iOS 18 平面风格后，浅色是招牌观感。
+            // ⚠️ 老存档里已经显式存了 `ui_dark: true` 的不会跟着变（设置 → 通用 →
+            // 「深色主题」手动关掉即可）。
+            ui_dark: false,
             ui_backdrop_blur: false,
-            block_mask_divisor: 4,
+            block_mask_divisor: 8,
+            block_area_low_performance: false,
             gyro_parallax: true,
             gyro_scale: 1.,
+            story: String::new(),
+            global_shader: String::new(),
+            rewind_count: 3,
+            render_bg_dim: false,
+            preserve_framebuffer: false,
+            render_fade: 0.5,
+            render_intro_secs: 0.0,
 
             autoplay: None,
         }
@@ -941,6 +935,17 @@ impl Config {
     /// 照抄 PhiraiAd。
     pub fn effective_note_flow_speed(&self, practice_multiplier: f32) -> f32 {
         self.global_note_flow_speed() * practice_multiplier
+    }
+
+    /// 流速是否**没被改过**（默认 1.0）。
+    ///
+    /// 改过就不上传成绩 —— 和 [`crate::config::NoteMap::is_identity`] 同一个道理：
+    /// 流速虽然只改观感、不改判定窗口，但它改变了音符的可读下落距离，属于「改版优势」。
+    ///
+    /// ⚠️ 这个条件必须**同时**出现在 `game.rs::can_upload` 和 `song.rs::rated` 里，
+    /// 两边不一致会出现「没提示不计入排行、但成绩其实没上传」。
+    pub fn note_flow_speed_is_default(&self) -> bool {
+        (self.global_note_flow_speed() - 1.).abs() < 1e-4
     }
 
     /// 全屏判定：任意位置的点按/滑动都能判定到音符（与参考的 `full_scrrn_judge` 一致）。
@@ -1174,6 +1179,12 @@ impl Config {
         Self::finite_or(self.miss_marker_time, 1.5).clamp(0.2, 10.)
     }
 
+    /// 帧缓冲累积的每帧淡出系数（0.05~1）。
+    #[inline]
+    pub fn render_fade_value(&self) -> f32 {
+        Self::finite_or(self.render_fade, 0.5).clamp(0.05, 1.)
+    }
+
     /// 音符拖影长度（0~1）。
     #[inline]
     pub fn note_trail_len_ratio(&self) -> f32 {
@@ -1233,5 +1244,37 @@ impl Config {
     #[inline]
     pub fn estimate_rks(&self, difficulty: f32, score: u32) -> f32 {
         (difficulty.max(0.) * (score as f32 / 1_000_000.).clamp(0., 1.)).max(0.)
+    }
+
+}
+
+/// 流速改过就**不上传**成绩 —— 和「音符映射」同理：它虽然只改观感（不改判定窗口），
+/// 但改变了音符的可读下落距离，按「改版」处理。
+/// 这个条件同时用在 `game.rs::can_upload` 和 `song.rs::rated` —— 两处必须一致。
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn changed_note_flow_speed_blocks_upload() {
+        let mut config = Config::default();
+        assert!(config.note_flow_speed_is_default(), "默认 1.0 应该算「没改过」");
+
+        config.note_flow_speed = 1.5;
+        assert!(!config.note_flow_speed_is_default());
+
+        // 回 1.0 就恢复 —— 滑块步长 0.05，1.0 是能精确取到的值。
+        config.note_flow_speed = 1.;
+        assert!(config.note_flow_speed_is_default());
+
+        // clamp 到 5.0 的极端值当然是「改过」。
+        config.note_flow_speed = 99.;
+        assert!(!config.note_flow_speed_is_default(), "clamp 之后是 5.0 → 算改过。");
+
+        // NaN 被 `global_note_flow_speed()` 当 1.0 → 渲染即默认 → 不算改过 ✓
+        // （和"音符映射"的保守方向一致：坏存档不该把上传永久锁死。)
+        config.note_flow_speed = f32::NAN;
+        assert!(config.note_flow_speed_is_default(), "NaN 渲染即默认 → 不算改过。");
     }
 }

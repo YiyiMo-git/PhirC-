@@ -585,26 +585,36 @@ impl Page for HistoryPage {
                 while self.row_btns.len() < visible.len() {
                     self.row_btns.push(RectButton::new());
                 }
+                let th = crate::newui::theme();
+                let n_rows = visible.len();
+                // ---- iOS 分组列表（inset grouped）----
+                // 整组共用一个圆角容器，行间靠内缩发丝线分隔。
+                // 原来是「每行一张独立圆角卡 + 8 单位间隙」，那是卡片语言的观感。
+                // ⚠️ 容器必须先铺：这是即时模式，晚画会盖住已经画好的行内容。
+                let group_radius = 0.012;
+                crate::newui::group_plate(ui, &th, row(y, row_h * n_rows as f32), group_radius);
                 for (i, rec) in visible.iter().enumerate() {
                     let r = row(y, row_h);
                     self.row_btns[i].set(ui, r);
                     let is_selected = self.selected.as_deref() == Some(rec.key.as_str());
-                    // 行卡 = 磨砂玻璃；选中 = 强调色薄涂 + 强调色描边；悬停提亮
                     let hp = if ui.rect_to_global(r).contains(mouse) { 1. } else { 0. };
-                    let th = crate::newui::theme();
-                    if is_selected {
-                        crate::newui::glass_plate_w(
-                            ui,
-                            r,
-                            0.012,
-                            &th,
-                            hp,
-                            th.with_a(th.glow, 0.16),
-                            crate::newui::glass_border(&th, 0.6),
-                        );
-                    } else {
-                        crate::newui::glass_card(ui, r, 0.012, &th, hp);
-                    }
+                    // 行自己**不填底板**（底板来自 `group_plate`）：只叠「选中」强调色
+                    // + 悬停墨色 + 底部内缩发丝线，三者都由 `group_row` 统一处理。
+                    crate::newui::group_row(
+                        ui,
+                        &th,
+                        r,
+                        hp,
+                        i == 0,
+                        i + 1 == n_rows,
+                        group_radius,
+                        0.026,
+                        if is_selected {
+                            th.with_a(th.glow, 0.16)
+                        } else {
+                            Color::new(0., 0., 0., 0.)
+                        },
+                    );
                     // 左侧段位色条
                     crate::newui::rounded(
                         ui,
@@ -667,7 +677,7 @@ impl Page for HistoryPage {
                         .color(text_faint())
                         .no_baseline()
                         .draw();
-                    y += row_h + 0.008;
+                    y += row_h;
                 }
                 if visible.len() < records.len() {
                     let more = tl!("list-more", "count" => (records.len() - visible.len()).to_string());

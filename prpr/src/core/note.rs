@@ -225,7 +225,18 @@ impl Note {
         } else {
             scale.y = 1.0;
         };
-        self.object.now_rotation().append_nonuniform_scaling(&scale).append_translation(&tr)
+        // RPEN skew：按「音符 x 位置 × 675 × skew(度)」算切变角，再折成剪切矩阵。
+        // 上游口径如此（不是线旋转）；Hold 不参与倾斜。
+        let mut shear = Matrix::identity();
+        if !matches!(self.kind, NoteKind::Hold { .. }) {
+            let skew = ctrl_obj.skew.now_opt().unwrap_or(0.);
+            if skew != 0. {
+                let slope = (self.object.translation.0.now() * 675. * skew).to_radians().tan()
+                    * if self.above { -1. } else { 1. };
+                shear[(0, 1)] = if scale.x.abs() > 1e-9 { slope * scale.y / scale.x } else { 0. };
+            }
+        }
+        self.object.now_rotation().append_nonuniform_scaling(&scale).append_translation(&tr) * shear
     }
 
     pub fn render(&self, res: &mut Resource, config: &mut RenderConfig, bpm_list: &mut BpmList) {

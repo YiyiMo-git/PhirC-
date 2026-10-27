@@ -33,6 +33,7 @@ edit-saving = 保存しています
 edit-load-file-failed = 外部ファイルの読み込みに失敗しました
 edit-save-failed = 保存に失敗
 edit-saved = 保存しました
+replay-finished = リプレイ再生が終了しました
 edit-preview-invalid = プレビュー時間が長すぎます
 
 edit-upload = アップロード

@@ -35,6 +35,7 @@ edit-saving = 保存中
 edit-load-file-failed = 加载外部文件失败
 edit-save-failed = 保存失败
 edit-saved = 保存成功
+replay-finished = 回放播放结束
 edit-preview-invalid = 预览时间超出范围
 edit-tags = 编辑标签
 edit-downloaded = 你不能编辑下载的谱面

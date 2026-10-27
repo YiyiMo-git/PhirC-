@@ -20,39 +20,21 @@ const BOARD_WIDTH: f32 = CARD_WIDTH * 3. + GAP * 2.;
 /// 卡片圆角半径（用户要求「做圆角卡片」）。用设计稿 px 表达：`UNIT` 的 1 单位 = 1200px。
 const CARD_RADIUS: f32 = 10. * UNIT;
 /// 卡片 1px 描边：不加的话圆角卡片在深色底上会显得很平（和 New UI 其它卡片不一致）。
-const CARD_BORDER: Color = Color::new(1., 1., 1., 0.07);
+const CARD_BORDER: Color = Color::new(1., 1., 1., 0.10);
 /// 卡片 / 背景底色（和课题结算一致的深色面板）。
 const BOARD_BG: Color = Color::new(17. / 255., 23. / 255., 34. / 255., 1.);
 /// 卡片底色：**半透明**，背景从下面透上来 —— 磨砂玻璃的第一层。
-const CARD_BG: Color = Color::new(34. / 255., 44. / 255., 60. / 255., 0.82);
+const CARD_BG: Color = Color::new(34. / 255., 44. / 255., 60. / 255., 1.);
 const COVER_BG: Color = Color::new(53. / 255., 65. / 255., 83. / 255., 1.);
 
-/// 卡片面 = 磨砂玻璃（用户要求「所有卡片统一」成磨砂玻璃观感）。
+/// 卡片面 = **扁平实色卡**（和设置页 / 谱面工具箱同一套语言）：
+/// 不透明底 + 1px 细边，不用磨砂、不用高光、不用颗粒。
 ///
-/// ⚠️ 这里**不能直接用 `newui::acrylic`**：那套是跟着主题走的，而这张榜
-/// 还会被 `render_export` 导出成图片 —— 浅色主题下导出会变成一块白。
-/// 所以这里用**固定深色**复刻同一套层次：半透明底 → 1px 浅边 → 顶部高光 → 磨砂颗粒。
-fn frosted_card(ui: &mut Ui, r: Rect, radius: f32) {
+/// ⚠️ 这里用**固定深色**：这张榜还会被 `render_export` 导出成图片，
+/// 跟着主题走的话浅色主题下导出会变成一块白。
+fn flat_card(ui: &mut Ui, r: Rect, radius: f32) {
     ui.fill_path(&r.rounded(radius), CARD_BG);
-    // 雾面：上半层往下渐隐的白膜（「磨砂」最直观的一层，原来缺这层）
-    let haze = Rect::new(r.x, r.y, r.w, r.h * 0.55);
-    ui.fill_path(
-        &haze.rounded(radius),
-        (Color::new(1., 1., 1., 0.05), (r.x, r.y), Color::new(1., 1., 1., 0.), (r.x, r.y + haze.h)),
-    );
-    ui.stroke_path(&r.rounded(radius), 2. * UNIT, CARD_BORDER);
-    // 顶部高光（玻璃反光）：加粗加亮，原来 0.001 高 / 0.06 alpha 基本看不见
-    ui.fill_rect(
-        Rect::new(r.x + radius * 0.5, r.y + 0.0012, (r.w - radius).max(0.), 0.0018),
-        Color::new(1., 1., 1., 0.16),
-    );
-    // 磨砂颗粒：细密横线（低 alpha，只加亮不加暗）
-    let step = 0.0073;
-    let mut y = (r.y / step).ceil() * step;
-    while y < r.bottom() {
-        ui.fill_rect(Rect::new(r.x + 0.002, y, (r.w - 0.004).max(0.), 0.0006), Color::new(1., 1., 1., 0.030));
-        y += step;
-    }
+    ui.stroke_path(&r.rounded(radius), 1. * UNIT, CARD_BORDER);
 }
 
 use crate::challenge::difficulty_label;
@@ -297,13 +279,13 @@ impl BestBoard {
                 continue;
             }
             let rect = Rect::new(x, y, card_width, card_height);
-            // ---------- 圆角 + 磨砂玻璃卡片 ----------
-            // 卡面（半透明底 / 浅边 / 顶部高光 / 磨砂颗粒）由 `frosted_card` 一次画完。
+            // ---------- 圆角 + 扁平实色卡片 ----------
+            // 卡面（不透明底 + 1px 细边）由 `flat_card` 一次画完。
             // 封面**不改几何尺寸**，而是用「卡片那个圆角矩形」做裁剪：
             // 封面只占卡片左侧，右缘是卡片内部的一条直边 —— 裁剪后左边两角跟着卡片变圆，
             // 右边两角落在卡片内部、本来就看不出来，正好是想要的效果。
             // （不能只把底色画圆：封面是直角矩形且贴着卡片左缘，会把左边两角整个盖住。）
-            frosted_card(ui, rect, CARD_RADIUS);
+            flat_card(ui, rect, CARD_RADIUS);
             let cover = Rect::new(x, y, card_height * 2., card_height);
             if let Some(illustration) = &card.illustration {
                 illustration.notify();

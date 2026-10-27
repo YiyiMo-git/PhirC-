@@ -19,7 +19,7 @@ use prpr::scene::{request_input, return_input, take_input};
 #[cfg(feature = "hykb")]
 use prpr::ui::Dialog;
 use prpr::{
-    ext::{open_url, semi_black, semi_white, SafeTexture, ScaleType, BLACK_TEXTURE},
+    ext::{open_url, semi_black, SafeTexture, ScaleType, BLACK_TEXTURE},
     judge::icon_index,
     scene::{request_file, return_file, show_error, show_message, take_file, NextScene, Scene},
     task::Task,
@@ -607,15 +607,23 @@ impl Scene for ProfileScene {
 
                                     let lf = ir.right() + 0.02;
 
+                                    // ⚠️ 名字和分数都压在**曲绘**上（曲绘上叠了 `semi_black(0.6)`，
+                                    // 恒深），所以两者都必须写死纯白。`DrawText` 的默认色是
+                                    // `theme::ink(1.)`，浅色主题下会翻成深色而看不见。
                                     if let Some(Ok(name)) = item.name.get().as_ref() {
-                                        ui.text(name).pos(lf, ir.y).max_width(r.right() - lf - 0.03).size(0.56).draw();
+                                        ui.text(name)
+                                            .pos(lf, ir.y)
+                                            .max_width(r.right() - lf - 0.03)
+                                            .size(0.56)
+                                            .color(WHITE)
+                                            .draw();
                                     }
 
                                     ui.text(format!("{:07} {}", item.record.score, if item.record.full_combo { "[FC]" } else { "" }))
                                         .pos(lf, ir.bottom() - 0.02)
                                         .anchor(0., 1.)
                                         .size(0.6)
-                                        .color(semi_white(0.6))
+                                        .color(Color::new(1., 1., 1., 0.6))
                                         .draw();
                                 });
                             }

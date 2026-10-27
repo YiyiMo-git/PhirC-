@@ -1,0 +1,276 @@
+/* ============================================================
+   app.css —— 真实页面布局与状态补充件（wireframe.css 只含结构件）
+   规则延续 wireframe.css：零硬编码视觉值，一切 var() 读 design-tokens.css；
+   布局断点用 auto-fit + min() 表达，不引入媒体查询里的像素魔法。
+   ============================================================ */
+
+/* ---------- 页面骨架 ---------- */
+
+.page-body {
+  display: grid;
+  gap: var(--sp-3);
+  width: 100%;
+  max-width: 980px;
+  margin-inline: auto;
+  padding: var(--sp-3) var(--sp-4) calc(var(--sp-8) * 3 + var(--safe-bottom));
+}
+
+/* 固定 dock（wireframe .ops-dock）的下方留白由 page-body 底部 padding 承担 */
+
+.lobby,
+.result-view {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.lobby-seats {
+  display: grid;
+  gap: var(--sp-3);
+  grid-template-columns: repeat(auto-fit, minmax(calc(var(--sp-10) * 4), 1fr));
+}
+
+.detail-cols {
+  display: grid;
+  gap: var(--sp-3);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(var(--sp-10) * 7)), 1fr));
+}
+
+.lobby-actions {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-top: var(--sp-3);
+}
+
+.chip-row {
+  display: flex;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.turn-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.turn-info {
+  display: grid;
+  gap: var(--sp-2);
+  flex: 1;
+}
+
+.pool-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+}
+
+/* ---------- 等待 / 加入错误卡片 ---------- */
+
+.loading-card {
+  display: grid;
+  gap: var(--sp-2);
+  justify-items: center;
+  text-align: center;
+  padding: var(--sp-8) var(--sp-4);
+}
+
+.loading-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+
+/* ---------- 大厅席位 / 结果 ---------- */
+
+.seat-card {
+  display: grid;
+  gap: var(--sp-2);
+  align-content: start;
+}
+
+.seat-card[A-side] {
+  border-color: var(--side-a);
+}
+
+.seat-card[B-side] {
+  border-color: var(--side-b);
+}
+
+.pick-list {
+  margin: 0;
+  padding-inline-start: var(--sp-4);
+  display: grid;
+  gap: var(--sp-1);
+}
+
+/* ---------- 主机面板行 ---------- */
+
+.host-rows {
+  display: grid;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+.conn-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: var(--touch-target);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  padding: var(--sp-1) var(--sp-2);
+}
+
+/* ---------- 时间线文本 ---------- */
+
+.tl-text {
+  flex: none;
+}
+
+.tl-foot {
+  font-size: var(--fz-2xs);
+  color: var(--text-tertiary);
+}
+
+/* ---------- 连接 chip / toast 语义色 ---------- */
+
+.badge[data-tone="pick"] {
+  color: var(--pick-accent);
+  border-color: var(--pick-accent);
+}
+
+.badge[data-tone="timeout"] {
+  color: var(--danger-timeout);
+  border-color: var(--danger-timeout);
+}
+
+.toast[data-tone="error"] {
+  border-color: var(--danger-hot);
+  color: var(--danger-hot);
+}
+
+.toast[data-tone="warn"] {
+  border-color: var(--danger-timeout);
+  color: var(--danger-timeout);
+}
+
+/* ---------- Bottom Sheet 内构件（wireframe 提供壳，内容件在此） ---------- */
+
+.sheet-actions {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+
+.sheet-grid {
+  display: grid;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
+
+.kind-row {
+  width: 100%;
+  text-align: inherit;
+}
+
+/* ---------- 表情浮层（不覆盖 dock / toast） ---------- */
+
+.emote-bar {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: var(--sp-2);
+  overflow-x: auto;
+}
+
+.emote-bar .btn {
+  min-width: calc(var(--sp-10) * 2);
+  flex: none;
+}
+
+.emote-float {
+  position: fixed;
+  right: var(--sp-4);
+  bottom: calc(var(--sp-8) * 3 + var(--safe-bottom));
+  translate: calc(var(--emote-dx, 0) * var(--sp-1)) 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  max-width: calc(var(--sp-10) * 6);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  background: var(--surface-elevated);
+  box-shadow: var(--elev-2);
+  z-index: 15;
+  animation: emote-rise 2.4s var(--ease-out) forwards;
+}
+
+.emote-face {
+  font-size: var(--fz-xl);
+  line-height: var(--lh-tight);
+}
+
+.emote-meta {
+  font-size: var(--fz-xs);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@keyframes emote-rise {
+  0% {
+    opacity: 0;
+    transform: translateY(0);
+  }
+  15% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(calc(-1 * var(--sp-8) * 2));
+  }
+}
+
+/* ---------- 入口页（index.html） ---------- */
+
+.entry-hero {
+  display: grid;
+  gap: var(--sp-3);
+  align-content: start;
+  width: 100%;
+  max-width: calc(var(--sp-10) * 14);
+  margin-inline: auto;
+  padding: var(--sp-6) var(--sp-4) calc(var(--sp-8) * 2 + var(--safe-bottom));
+}
+
+.field {
+  display: grid;
+  gap: var(--sp-1);
+  font-size: var(--fz-sm);
+  color: var(--text-secondary);
+}
+
+.input {
+  min-height: var(--touch-target);
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-strong);
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+  padding: 0 var(--sp-3);
+  font: inherit;
+  font-size: var(--fz-md);
+  touch-action: manipulation;
+}
+
+.input:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
+}
+
+.identity-row .btn[aria-pressed="true"] {
+  border-color: var(--brand-blue);
+  color: var(--brand-blue);
+}

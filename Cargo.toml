@@ -22,6 +22,7 @@ license = "GPL-3.0-only"
 anyhow = "1.0"
 async-trait = "0.1.89"
 base64 = "0.22.1"
+flate2 = "1.0"
 bitflags = "2.11.0"
 chrono = "0.4.44"
 fluent = "0.17.0"
@@ -43,6 +44,7 @@ serde = "1.0.228"
 serde_json = "1.0.149"
 serde_yaml = "0.9.34"
 sha2 = "0.10.9"
+zstd = "0.13.3"
 sys-locale = "0.3.2"
 tempfile = "3.27.0"
 tokio = "1.50.0"
@@ -68,7 +70,13 @@ prpr-l10n = { path = "prpr-l10n" }
 sasa = { git = "https://github.com/Mivik/sasa", rev = "e76229b", default-features = false }
 
 [profile.release]
+# 体积优先（APK 大小）：opt-level=2（平衡点，音游不吃 s/z 的性能损失）、
+# strip=true（剥符号）、lto=true + codegen-units=1（跨 crate 内联 + 去死代码，
+# libphira.so 实测可再小 25-40%）。构建时间会明显变长（全量 release 约 +5-10 分钟）。
+# ⚠️ 不能加 panic="abort"：prpr/src/ui.rs 有 catch_unwind（自绘输入框回滚路径）。
 opt-level = 2
+lto = true
+codegen-units = 1
 strip = true
 
 [profile.dev.package."*"]

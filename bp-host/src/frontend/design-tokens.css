@@ -1,0 +1,113 @@
+/* ============================================================
+   bp-host 设计令牌 —— 唯一视觉值来源（交付要求：组件禁止硬编码视觉值）
+   基调：Phira 社区调性 · 简约清爽二次元 · 蓝色为基调
+   消费方式：组件一律 var() 读取；tokens.ts 仅做名称镜像与运行时读取
+   ============================================================ */
+
+:root {
+  /* ---------- 色彩角色（handoff 第 5 节逐字清单） ---------- */
+  /* 面 */
+  --surface: #0c1322;            /* 页面底（近 Phira 深蓝夜空） */
+  --surface-elevated: #141d31;   /* 卡片 / 面板 / Bottom Sheet */
+  --surface-sunken: #0a0f1b;     /* 凹陷区（曲池空位、时间线） */
+
+  /* 选手 / 主操作 */
+  --brand-blue: #3d8bff;         /* 选手 A / 确认按钮 / 焦点环 */
+  --opponent: #ff6b9d;           /* 选手 B / 对比色 */
+
+  /* 动作语义 */
+  --ban-muted: #55627e;          /* Ban 态：弱化、划线感 */
+  --pick-accent: #35d6a6;        /* Pick 态：薄荷绿强调 */
+  --danger-timeout: #ffb35c;     /* 最后 10s 琥珀（升至红用 --danger-hot） */
+  --danger-hot: #ff5a5a;         /* 超时 / 危险终点色 */
+  --interference: #9d6bff;       /* 干扰体系主色 */
+  --spectator-muted: #6b7a99;    /* 观众视角弱化层 */
+
+  /* 文本 */
+  --text-primary: #eef3ff;
+  --text-secondary: #aab6d0;
+  --text-tertiary: #6b7a99;
+
+  /* 线与覆盖 */
+  --border-subtle: rgba(170, 182, 208, 0.14);
+  --border-strong: rgba(170, 182, 208, 0.28);
+  --overlay-scrim: rgba(4, 8, 18, 0.62);
+  --glass-blur: blur(14px);      /* 遮蔽曲目的毛玻璃占位 */
+
+  /* 选手角色 HARDCODE 别名（组件层永远引用角色名，不引用色值） */
+  --side-a: var(--brand-blue);
+  --side-b: var(--opponent);
+
+  /* ---------- 字号阶梯（1.2 为主阶梯） ---------- */
+  --font-stack: "MiSans", "PingFang SC", "HarmonyOS Sans SC", "Noto Sans SC",
+    "Segoe UI", system-ui, sans-serif;
+  --fz-2xs: 0.625rem;   /* 10px 时间线脚注 */
+  --fz-xs: 0.75rem;     /* 12px 辅助说明 / 徽标 */
+  --fz-sm: 0.8125rem;   /* 13px 次级文本 */
+  --fz-md: 0.9375rem;   /* 15px 正文 */
+  --fz-lg: 1.125rem;    /* 18px 卡片标题 */
+  --fz-xl: 1.375rem;    /* 22px 倒计时数字 */
+  --fz-2xl: 1.75rem;    /* 28px 强调数字 */
+  --fz-hero: 2.75rem;   /* 44px 倒计时主数 / 分享卡大标题 */
+  --fw-medium: 500;
+  --fw-semibold: 600;
+  --fw-bold: 700;
+  --lh-tight: 1.2;
+  --lh-body: 1.5;
+
+  /* ---------- 间距刻度（4px 栅格） ---------- */
+  --sp-1: 0.25rem;   /* 4px */
+  --sp-2: 0.5rem;    /* 8px */
+  --sp-3: 0.75rem;   /* 12px */
+  --sp-4: 1rem;      /* 16px */
+  --sp-5: 1.25rem;   /* 20px */
+  --sp-6: 1.5rem;    /* 24px */
+  --sp-8: 2rem;      /* 32px */
+  --sp-10: 2.5rem;   /* 40px */
+
+  /* ---------- 圆角 / 摘要影子 ---------- */
+  --r-sm: 0.5rem;     /* 徽标、小格 */
+  --r-md: 0.75rem;    /* 卡片内块 */
+  --r-lg: 1rem;       /* 卡片 / Sheet */
+  --r-pill: 999px;    /* 胶囊 / 头像 */
+  --elev-1: 0 2px 8px rgba(2, 6, 16, 0.35);
+  --elev-2: 0 8px 24px rgba(2, 6, 16, 0.45);
+  --ring-focus: 0 0 0 2px var(--surface), 0 0 0 4px var(--brand-blue);
+
+  /* ---------- 触控与移动端底线 ---------- */
+  --touch-target: 44px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --dvh: 100dvh;      /* 移动端视口基线（禁 100vh） */
+
+  /* ---------- 动效（需求：唯一存在感动效=回合切换边框高亮迁移 150-200ms；
+       Ban/Pick 120ms 反馈；干扰克制脉冲） ---------- */
+  --dur-feedback: 120ms;   /* Ban/Pick 点击反馈 */
+  --dur-turn: 180ms;       /* 回合切换边框高亮迁移 */
+  --dur-fx: 300ms;         /* 干扰脉冲 / 淡入 */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-turn: cubic-bezier(0.33, 0.9, 0.28, 1);
+}
+
+/* 浅色环境（夜景设备对照版）：证明组件层完全由令牌驱动，无一处硬编码 */
+[data-theme="light"] {
+  --surface: #f4f7fd;
+  --surface-elevated: #ffffff;
+  --surface-sunken: #e9eef7;
+  --text-primary: #17233d;
+  --text-secondary: #4d5b78;
+  --text-tertiary: #8595b3;
+  --border-subtle: rgba(23, 35, 61, 0.12);
+  --border-strong: rgba(23, 35, 61, 0.22);
+  --elev-1: 0 2px 8px rgba(23, 35, 61, 0.08);
+  --elev-2: 0 8px 24px rgba(23, 35, 61, 0.12);
+  --spectator-muted: #7285a8;
+}
+
+/* 系统级可访问性：动效三元组整体降级 */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-feedback: 0ms;
+    --dur-turn: 0ms;
+    --dur-fx: 0ms;
+  }
+}

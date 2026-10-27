@@ -37,6 +37,11 @@ android {
 
     buildTypes {
         release {
+            // ⚠️ 别开 minifyEnabled/shrinkResources：收益≈0（本工程无 androidx/matiral 等
+            // 外部 UI 依赖，Java 代码极少），而 Rust 侧两个类靠**字符串 find_class**
+            // 反射（`moe/mivik/inputbox/InputBox`、`org/rustls/platformverifier/Verifier`），
+            // R8 重命名/移除它们 → 输入框闪退、账号登录证书链失败。
+            // 体积主要靠 Rust profile 的 lto/strip（见根 Cargo.toml [profile.release]）。
             minifyEnabled false
             shrinkResources false
             signingConfig signingConfigs.release

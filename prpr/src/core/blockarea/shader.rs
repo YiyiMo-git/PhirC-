@@ -20,13 +20,23 @@ use std::cell::RefCell;
 // `blockarea/mask.rs`。加上 `#[path]` 才能把两个兄弟文件当成子模块。
 #[path = "mask.rs"]
 mod mask;
-pub use mask::{mask_divisor, set_mask_divisor, MAX_MASK_DIVISOR, MIN_MASK_DIVISOR};
+pub use mask::{low_performance, mask_divisor, set_low_performance, set_mask_divisor, MAX_MASK_DIVISOR, MIN_MASK_DIVISOR};
+#[path = "color.rs"]
+mod tint;
 #[path = "touch.rs"]
 mod touch;
 
 /// A resolved rectangle (axis-aligned in its own space).
 #[derive(Clone, PartialEq)]
 pub struct Zone {
+    /// RPEN 新格式噪区在投影相机下的屏幕投影；`None` = 直接在谱面空间栅格化。
+    pub projection: Option<Matrix>,
+    /// RPEN 新格式噪区（`blockAreaList` 的 `bottomLeft` 版本）。
+    pub line2area: bool,
+    /// 新格式噪区的纵向拉伸（`1.5 / aspect`）；旧噪区恒为 1。
+    pub y_scale: f32,
+    /// RPE `colorEvents` 取到的 RGB；官方 blockAreaList 保留原生红。
+    pub color: [f32; 3],
     pub center: Vector,
     pub half: Vector,
     pub angle: f32,
@@ -39,6 +49,20 @@ pub struct Zone {
 }
 
 impl Zone {
+    /// 只比较覆盖状态（忽略颜色），供 RPEN 新格式噪区的掩码缓存使用。
+    pub fn same_mask(&self, other: &Self) -> bool {
+        self.projection == other.projection
+            && self.line2area == other.line2area
+            && self.y_scale == other.y_scale
+            && self.center == other.center
+            && self.half == other.half
+            && self.angle == other.angle
+            && self.invert == other.invert
+            && self.active == other.active
+            && self.ready == other.ready
+            && self.opacity == other.opacity
+    }
+
     pub fn from_area(area: &BlockArea, time: f64, aspect: f32) -> Option<Self> {
         let phase = area.phase(time);
         if phase == BlockPhase::Hidden {
@@ -52,6 +76,10 @@ impl Zone {
         let active = phase == BlockPhase::Active;
         let fades_in = !area.is_active(area.appear_time);
         Some(Self {
+            projection: None,
+            line2area: false,
+            y_scale: 1.,
+            color: area.color,
             center: tr.center,
             half,
             angle: tr.rotation.to_radians(),
@@ -84,6 +112,14 @@ static DISPLACE_TEX: Lazy<Texture2D> = Lazy::new(|| tex(include_bytes!("../../..
 static SPARK_TEX: Lazy<Texture2D> = Lazy::new(|| tex(include_bytes!("../../../../assets/blockarea/PointNoise.png"), TextureWrap::Repeat));
 // This PNG is regenerated from original RGB565 with full 5/6-bit replication.
 // The initial exporter only shifted bits, which darkened the hover dissolve.
+/// 1x1 占位贴图：uColored == 0 时绑给两个颜色采样器。那一支不会被采样，
+/// 但 GLSL 要求采样器有贴图绑定。
+static EMPTY_TEX: Lazy<Texture2D> = Lazy::new(|| {
+    let texture = Texture2D::from_rgba8(1, 1, &[0, 0, 0, 255]);
+    texture.set_filter(FilterMode::Nearest);
+    texture
+});
+
 static NOISE_TEX: Lazy<Texture2D> = Lazy::new(|| tex(include_bytes!("../../../../assets/blockarea/FD_Noise_00000.png"), TextureWrap::Mirror));
 
 // Typed f32 values are essential: this macroquad fork rejects f64 for Float1.
@@ -139,6 +175,10 @@ const COLORS: &[(&str, [f32; 4])] = &[
 #[derive(Default)]
 struct FrameTextures {
     masks: mask::Masks,
+    /// 彩色噪域的两张颜色归属贴图（激活 / 未激活）。
+    colors: tint::Colors,
+    color_textures: [Option<Texture2D>; 2],
+    uploaded_colors: Option<u64>,
     effect: Option<Texture2D>,
     aux: Option<Texture2D>,
     scene: Option<Texture2D>,
@@ -160,6 +200,7 @@ fn load_block_material(disabled: bool) -> Result<Material, miniquad::ShaderError
         ("uDisabledSparkTint".to_owned(), UniformType::Float3),
         ("_TouchPosCount".to_owned(), UniformType::Int1),
         ("uLayer".to_owned(), UniformType::Int1),
+        ("uColored".to_owned(), UniformType::Int1),
     ];
     uniforms.extend(FLOATS.iter().map(|(name, _)| (name.to_string(), UniformType::Float1)));
     uniforms.extend(COLORS.iter().map(|(name, _)| (name.to_string(), UniformType::Float4)));
@@ -187,6 +228,9 @@ fn load_block_material(disabled: bool) -> Result<Material, miniquad::ShaderError
             "uScene".to_owned(),
             "uAuxMasks".to_owned(),
             "uNoiseTex".to_owned(),
+            // 彩色噪域（RPE colorEvents）；uColored == 0 时不会被采样。
+            "uActiveColors".to_owned(),
+            "uDisabledColors".to_owned(),
         ],
     };
     load_material(VERTEX, FRAGMENT, params).map(|material| {
@@ -290,10 +334,91 @@ pub(crate) fn draw_zones_at(res: &mut Resource, aspect: f32, zones: &[Zone], tim
 }
 
 pub(crate) fn draw_layer_at(res: &mut Resource, aspect: f32, zones: &[Zone], time: f32, disabled: bool, touches: &[(u64, Vec2)]) {
+    FRAME.with(|frame| draw_layer_frame(res, aspect, zones, time, disabled, touches, frame, None));
+}
+
+/// 每层独立的帧状态（RPEN 分层噪域用）。
+///
+/// 掩码 / 纹理缓存必须按层隔离：两层叠在一起时若共用 `FRAME`，后画的一层会
+/// 把前一层的掩码覆盖掉，出现「只有最上层可见」。
+#[derive(Default)]
+pub struct BlockRenderer {
+    frame: RefCell<FrameTextures>,
+}
+
+impl BlockRenderer {
+    pub fn reset(&mut self) {
+        self.frame.borrow_mut().touch.reset();
+    }
+
+    /// RPEN 新格式噪区：`single` 是反转规则（某层恰好 1 个反转区才翻转）。
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_next(&self, res: &mut Resource, aspect: f32, zones: &[Zone], single: bool, disabled: bool, touches: &[(u64, Vector)], flip_x: bool) {
+        let projection = unsafe { get_internal_gl() }.quad_gl.get_projection_matrix();
+        let mut touches: Vec<_> = touches
+            .iter()
+            .map(|&(id, p)| {
+                let p = projection * vec4(if flip_x { -p.x } else { p.x }, -p.y, 0., 1.);
+                (id, vec2(p.x / p.w, p.y / p.w) * 0.5 + vec2(0.5, 0.5))
+            })
+            .collect();
+        touches.sort_by_key(|(id, _)| *id);
+        draw_layer_frame(res, aspect, zones, res.time as f32, disabled, &touches, &self.frame, Some(single));
+    }
+}
+
+/// RPEN skin 协议：六个独立覆盖位（激活 / 未激活 / Ready，各自普通与反转）。
+pub(crate) fn skin_mask(width: usize, height: usize, aspect: f32, zones: &[Zone]) -> Vec<u8> {
+    let stride = width + 1;
+    let mut result = vec![0; width * height * 4];
+    for state in 0..3 {
+        let mut normal = vec![0_i32; stride * height];
+        let mut inverse = vec![0_i32; stride * height];
+        for z in zones.iter().filter(|z| match state {
+            0 => z.active,
+            1 => !z.active,
+            _ => z.ready && !z.active,
+        }) {
+            let counts = if z.invert { &mut inverse } else { &mut normal };
+            mask::raster_rows(width, height, aspect, z, |y, a, b| {
+                counts[y * stride + a] += 1;
+                counts[y * stride + b] -= 1;
+            });
+        }
+        for y in 0..height {
+            let (mut n, mut s) = (0, 0);
+            for x in 0..width {
+                n += normal[y * stride + x];
+                s += inverse[y * stride + x];
+                let i = (y * width + x) * 4;
+                if n > 0 {
+                    result[i] |= 1 << (2 * state);
+                }
+                if s == 1 {
+                    result[i] |= 2 << (2 * state);
+                }
+                result[i + 3] = 255;
+            }
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_layer_frame(
+    res: &mut Resource,
+    aspect: f32,
+    zones: &[Zone],
+    time: f32,
+    disabled: bool,
+    touches: &[(u64, Vec2)],
+    cell: &RefCell<FrameTextures>,
+    next: Option<bool>,
+) {
     let needed = if disabled {
         zones.iter().any(|z| !z.active && z.opacity > 0.)
     } else {
-        zones.iter().any(|z| z.active || z.ready) || !touches.is_empty() || FRAME.with(|frame| frame.borrow().touch.visible())
+        zones.iter().any(|z| z.active || z.ready) || !touches.is_empty() || cell.borrow().touch.visible()
     };
     if !needed {
         return;
@@ -335,13 +460,20 @@ pub(crate) fn draw_layer_at(res: &mut Resource, aspect: f32, zones: &[Zone], tim
     };
     let viewport = gl.quad_gl.get_viewport().unwrap_or((0, 0, width as i32, height as i32));
     gl.flush();
-    FRAME.with(|frame| {
-        let mut frame = frame.borrow_mut();
+    {
+        let mut frame = cell.borrow_mut();
         let (width, height) = (viewport.2.max(1) as usize, viewport.3.max(1) as usize);
-        frame.masks.render_displaced(width, height, aspect, zones, time);
+        if let Some(single) = next {
+            frame.masks.render_next(width, height, aspect, zones, time, single);
+        } else {
+            frame.masks.render_displaced(width, height, aspect, zones, time);
+        }
         if !disabled {
             frame.touch.update_fingers(touches, time);
-            let bw = frame.masks.width / 2;
+            // 低性能模式：跳过这一整趟 CPU 扫描（`bw×bh` 个采样、每个写 2×2，
+            // 等于再扫一遍 `ew×eh`）。代价是没有触摸/悬停高亮 —— 这一档就是拿它换帧率。
+            // `update_fingers` 仍然跑，保证手指状态不会和别处脱节。
+            let bw = if low_performance() { 0 } else { frame.masks.width / 2 };
             let bh = frame.masks.height / 2;
             for y in 0..bh {
                 for x in 0..bw {
@@ -393,6 +525,40 @@ pub(crate) fn draw_layer_at(res: &mut Resource, aspect: f32, zones: &[Zone], tim
                 .raw_miniquad_texture_handle()
                 .update(unsafe { get_internal_gl() }.quad_context, &frame.masks.aux_rgba);
         }
+        // ---- 彩色噪域（RPE colorEvents）----
+        //
+        // 只有真的存在「非默认红」的块时才生成（`Colors::update` 内部判）：
+        // 绝大多数谱面一个彩色块都没有，这条路径完全不该有开销。
+        // 生成结果按 `revision` 缓存，只有内容变了才重传。
+        //
+        // ⚠️ 必须**结构体解构**：`frame` 是 `RefMut`，直接写
+        // `frame.colors.update(&frame.masks, ..)` 会因为两次借用都走 `frame`
+        // 而报 E0502（DerefMut 不能拆字段）。解构之后两个字段是独立借用。
+        let colored = if next.is_some() {
+            // rpe-next 噪区不走彩色调色板路径（上游同样如此）。
+            false
+        } else {
+            let FrameTextures {
+                colors,
+                masks,
+                color_textures,
+                uploaded_colors,
+                ..
+            } = &mut *frame;
+            let colored = colors.update(masks, aspect, zones);
+            if colored && *uploaded_colors != Some(colors.revision) {
+                for layer in 0..2 {
+                    let size = (colors.width as u16, colors.height as u16);
+                    let texture = Texture2D::from_rgba8(size.0, size.1, &colors.rgba[layer]);
+                    texture.set_filter(FilterMode::Linear);
+                    if let Some(old) = color_textures[layer].replace(texture) {
+                        old.delete();
+                    }
+                }
+                *uploaded_colors = Some(colors.revision);
+            }
+            colored
+        };
         if frame.scene.is_none_or(|texture| (texture.width() as u32, texture.height() as u32) != dim) {
             let texture = miniquad::Texture::new(
                 unsafe { get_internal_gl() }.quad_context,
@@ -422,6 +588,9 @@ pub(crate) fn draw_layer_at(res: &mut Resource, aspect: f32, zones: &[Zone], tim
         m.set_texture("uScene", scene);
         m.set_texture("uAuxMasks", frame.aux.unwrap());
         m.set_texture("uNoiseTex", *NOISE_TEX);
+        m.set_texture("uActiveColors", frame.color_textures[0].unwrap_or(*EMPTY_TEX));
+        m.set_texture("uDisabledColors", frame.color_textures[1].unwrap_or(*EMPTY_TEX));
+        m.set_uniform("uColored", i32::from(colored));
         m.set_uniform("uUnityTime", vec4(time / 20., time, time * 2., time * 3.));
         m.set_uniform("uView", vec3(width as f32, height as f32, aspect));
         m.set_uniform("_ScreenParams", vec4(width as f32, height as f32, 1. + 1. / width as f32, 1. + 1. / height as f32));
@@ -434,7 +603,7 @@ pub(crate) fn draw_layer_at(res: &mut Resource, aspect: f32, zones: &[Zone], tim
         gl_use_material(m);
         draw_rectangle(-1., -1. / aspect, 2., 2. / aspect, WHITE);
         gl_use_default_material();
-    });
+    }
 }
 
 fn copy_scene(res: &Resource, pass: Option<miniquad::RenderPass>, viewport: (i32, i32, i32, i32), texture: Texture2D) {

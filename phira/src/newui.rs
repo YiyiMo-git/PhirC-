@@ -31,7 +31,7 @@
 
 use macroquad::prelude::*;
 use prpr::{
-    core::{draw_trigrid, Matrix, Point, BOLD_FONT},
+    core::{Matrix, Point, BOLD_FONT},
     ext::{RectExt, SafeTexture},
     ui::{DrawText, IntoShading, RectButton, Shading, Ui},
 };
@@ -39,36 +39,25 @@ use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // ============================================================
-// 毛玻璃（磨砂观感）
+// 平面材质（iOS 18 风格）
 // ============================================================
 //
-// 【为什么不用真的背景模糊】
-// 曾经的实现是用 macroquad fork 的 `_ScreenTexture`（fragment shader 里出现这个名字
-// 就会把当前 framebuffer 抓成纹理）对卡片背后的像素做高斯模糊。看起来很美，但：
+// 【2026-10-09 改版】用户要求把整体观感从「磨砂玻璃卡片」改成
+// **平面风格 / iOS 18 风格**。原来那套配方（柔光层 + 半透明底板 + 雾面 +
+// 顶部高光 + 细密颗粒）整条退役，换成 iOS 的 inset grouped 语言：
 //
-//  1. `acrylic` 被设置/曲库/历史/收藏/黑名单/消息/资源包/弹窗/对话框全都复用，
-//     **一屏会触发几十次 `glCopyTexImage2D` 全屏拷贝**；
-//  2. 「读当前 framebuffer 再写回同一块」在多数驱动上状态/顺序极难保证，
-//     实测会出现**大片元素被吞进黑色**（文字、图标、预览长条一起消失）；
-//  3. 代价与收益完全不成比例 —— 背景是「纯色底 + 低频光波」，模糊前后几乎看不出差别。
+//   * 页面底 = `systemGroupedBackground`（浅 `#F2F2F7` / 深纯黑）；
+//   * 卡片   = `secondarySystemGroupedBackground`（浅纯白 / 深 `#1C1C1E`），**不透明**；
+//   * 层级靠「底色差 + 1px 分隔线」做，**不靠投影、不靠发光、不靠模糊**；
+//   * 悬停 = 叠一层极淡的墨色（[`Theme::wash`]），不是提亮玻璃。
 //
-// 所以改回工程里原本那套**零状态**的磨砂配方：柔光层 + 半透明底板 + 顶部高光
-// + 1px 浅边 + 细密颗粒。观感是磨砂玻璃，且不碰任何全局渲染状态。
-
-/// 对 `r` 画一层**柔和外扩光晕**，模拟「背景被糊开」的乳白感。
-///
-/// 纯几何：同色圆角块向外层层扩散、alpha 递减（就是 [`glow_rect`] 那套）。
-/// 无着色器、无抓屏、无状态，任何驱动都不会出问题。
-fn frosted_halo(ui: &mut Ui, r: Rect, radius: f32, th: &Theme) {
-    // 极小控件不画（省顶点，也避免糊成一团）
-    if r.w < 0.02 || r.h < 0.02 {
-        return;
-    }
-    // 边缘柔光：就是「背景被糊开」的几何近似。原来 0.055 / 半径 +0.020 太含蓄，
-    // 用户反馈「卡片看不出模糊效果」，这里把亮度和扩散范围都加大一档。
-    let col = if th.dark { th.white(0.10) } else { th.white(0.42) };
-    glow_rect(ui, r, radius, col, radius * 0.9 + 0.030, 6);
-}
+// 好消息是 `acrylic` / `glass_plate_w` / `glass_card` 这些**函数名和签名全部保留**，
+// 只换内部实现 —— 所以全 App 几十个调用点一个都不用改，一次性变平面。
+//
+// ⚠️ 连带影响：浅色主题的页面底从「恒定深色」变成了浅灰 `#F2F2F7`，于是
+// 「压在页面底上的写死白字」在浅色主题下会反过来失效。页面里凡是画在**页面底**
+// （而不是卡片、也不是封面图）上的文字/图标，都必须走 `th.text*` / `theme::ink`；
+// 只有压在**封面图 / 曲绘 / 视频**上的才继续写死白。
 
 // ============================================================
 // 主题
@@ -130,69 +119,82 @@ pub const fn rgba(r: u8, g: u8, b: u8, a: f32) -> Color {
 
 impl Theme {
     pub const DARK: Theme = Theme {
-        bg: rgb(0x0d, 0x0d, 0x0d),
-        bg_alt: rgb(0x15, 0x16, 0x19),
-        // 深色面板同样半透明化：背景光斑透出磨砂玻璃感
-        bg_elev: Color::new(0.125, 0.141, 0.169, 0.82),
-        bg_hover: rgb(0x2b, 0x34, 0x40),
-        border: rgb(0x3a, 0x40, 0x4b),
-        border_soft: rgb(0x26, 0x2b, 0x34),
+        // systemGroupedBackground（深）—— 纯黑
+        bg: rgb(0x00, 0x00, 0x00),
+        bg_alt: rgb(0x1c, 0x1c, 0x1e),
+        // secondarySystemGroupedBackground（深）—— **不透明实色卡片**
+        bg_elev: rgb(0x1c, 0x1c, 0x1e),
+        // systemGray5（深）
+        bg_hover: rgb(0x2c, 0x2c, 0x2e),
+        // separator / separator（弱）
+        border: rgba(84, 84, 88, 0.65),
+        border_soft: rgba(84, 84, 88, 0.36),
 
-        // 文字全白（用户要求）：主文字纯白，两级弱化文字用白色透明度保持层次
-        text: Color::new(1., 1., 1., 0.98),
-        text_hi: Color::new(1., 1., 1., 1.),
-        text_dim: Color::new(1., 1., 1., 0.80),
-        text_mute: Color::new(1., 1., 1., 0.58),
+        // label / secondaryLabel / tertiaryLabel（深）
+        text: rgb(0xff, 0xff, 0xff),
+        text_hi: rgb(0xff, 0xff, 0xff),
+        text_dim: rgba(235, 235, 245, 0.60),
+        text_mute: rgba(235, 235, 245, 0.30),
 
-        accent: rgb(0x00, 0x96, 0xff),
-        accent_hi: rgb(0x5f, 0xd1, 0xff),
-        glow: rgb(0x4c, 0xc2, 0xff),
+        // systemBlue（深）
+        accent: rgb(0x0a, 0x84, 0xff),
+        accent_hi: rgb(0x40, 0x9c, 0xff),
+        glow: rgb(0x0a, 0x84, 0xff),
 
-        blue: rgb(0x7c, 0xc4, 0xff),
-        teal: rgb(0x55, 0xf0, 0xcf),
-        yellow: rgb(0xf2, 0xe1, 0x9a),
-        orange: rgb(0xff, 0xb1, 0x71),
-        red: rgb(0xff, 0x6b, 0x7d),
+        blue: rgb(0x0a, 0x84, 0xff),
+        teal: rgb(0x40, 0xc8, 0xe0),
+        yellow: rgb(0xff, 0xd6, 0x0a),
+        orange: rgb(0xff, 0x9f, 0x0a),
+        red: rgb(0xff, 0x45, 0x3a),
 
-        // 难度色（用户指定）：EZ 绿 / HD 蓝 / IN 红 / AT 黑 / SP 彩虹（见 diff_kind）
-        ez: rgb(0x66, 0xff, 0x9c),
-        hd: rgb(0x5d, 0xd4, 0xff),
-        insane: rgb(0xff, 0x7a, 0x89),
+        // 难度色（保留 EZ 绿 / HD 蓝 / IN 红 / AT 黑 / SP 彩虹 的既定语义，
+        // 色值对齐 iOS 系统色）
+        ez: rgb(0x30, 0xd1, 0x58),
+        hd: rgb(0x0a, 0x84, 0xff),
+        insane: rgb(0xff, 0x45, 0x3a),
         at: rgb(0x0a, 0x0c, 0x10),
 
         dark: true,
     };
 
-    /// Windows 11 浅色（Light）色板：亚克力白面板 + 灰白底 + Win11 强调蓝。
+    /// **iOS 18 浅色（Light）**：`#F2F2F7` 分组底 + 白色卡片 + 系统蓝 `#007AFF`。
+    ///
+    /// 这是现在的默认主题（`Config.ui_dark` 默认 false）。
     pub const LIGHT: Theme = Theme {
-        bg: rgb(0xf3, 0xf3, 0xf3),
-        bg_alt: rgb(0xfa, 0xfa, 0xfa),
-        // 面板 = 72% 白：磨砂亚克力（背景光斑透过来）
-        bg_elev: Color::new(1., 1., 1., 0.72),
-        bg_hover: rgb(0xeb, 0xeb, 0xeb),
-        border: rgb(0xd9, 0xd9, 0xd9),
-        border_soft: rgb(0xeb, 0xeb, 0xeb),
+        // systemGroupedBackground（浅）
+        bg: rgb(0xf2, 0xf2, 0xf7),
+        bg_alt: rgb(0xff, 0xff, 0xff),
+        // secondarySystemGroupedBackground（浅）—— 纯白实色卡片
+        bg_elev: rgb(0xff, 0xff, 0xff),
+        // systemGray5（浅）
+        bg_hover: rgb(0xe5, 0xe5, 0xea),
+        // separator / separator（弱）
+        border: rgba(60, 60, 67, 0.29),
+        border_soft: rgba(60, 60, 67, 0.18),
 
-        text: rgb(0x1b, 0x1b, 0x1b),
+        // label / secondaryLabel / tertiaryLabel（浅）
+        text: rgb(0x00, 0x00, 0x00),
         text_hi: rgb(0x00, 0x00, 0x00),
-        text_dim: rgb(0x5d, 0x5d, 0x5d),
-        text_mute: rgb(0x91, 0x91, 0x91),
+        text_dim: rgba(60, 60, 67, 0.60),
+        text_mute: rgba(60, 60, 67, 0.30),
 
-        accent: rgb(0x00, 0x67, 0xc0),
-        accent_hi: rgb(0x00, 0x78, 0xd4),
-        glow: rgb(0x0f, 0x6c, 0xd0),
+        // systemBlue（浅）
+        accent: rgb(0x00, 0x7a, 0xff),
+        accent_hi: rgb(0x33, 0x96, 0xff),
+        glow: rgb(0x00, 0x7a, 0xff),
 
-        blue: rgb(0x00, 0x5f, 0xb8),
-        teal: rgb(0x00, 0x7f, 0x6e),
-        yellow: rgb(0xad, 0x83, 0x00),
-        orange: rgb(0xb4, 0x5a, 0x00),
-        red: rgb(0xc4, 0x2b, 0x1c),
+        blue: rgb(0x00, 0x7a, 0xff),
+        teal: rgb(0x30, 0xb0, 0xc7),
+        // systemYellow 在白底上做文字太浅，压深一档保证可读
+        yellow: rgb(0xf0, 0xa8, 0x00),
+        orange: rgb(0xff, 0x95, 0x00),
+        red: rgb(0xff, 0x3b, 0x30),
 
-        // 难度色（浅色底加深一档保证可读）
-        ez: rgb(0x0f, 0x7b, 0x0f),
-        hd: rgb(0x00, 0x67, 0xc0),
-        insane: rgb(0xc4, 0x2b, 0x1c),
-        at: rgb(0x17, 0x17, 0x17),
+        // 难度色（同深色主题的语义，取浅色版系统色）
+        ez: rgb(0x34, 0xc7, 0x59),
+        hd: rgb(0x00, 0x7a, 0xff),
+        insane: rgb(0xff, 0x3b, 0x30),
+        at: rgb(0x1c, 0x1c, 0x1e),
 
         dark: false,
     };
@@ -307,11 +309,12 @@ pub mod px {
     pub const MENU_ITEM_H: f32 = 58.;
     pub const MENU_GAP: f32 = 10.;
     pub const MENU_ICON: f32 = 20.;
-    pub const MENU_RADIUS: f32 = 6.;
+    // 圆角按 iOS 的连续圆角观感整体调大一档（原来那套是给玻璃卡片的硬圆角）
+    pub const MENU_RADIUS: f32 = 10.;
 
-    pub const CARD_RADIUS: f32 = 10.;
-    pub const CHIP_RADIUS: f32 = 3.;
-    pub const PANEL_RADIUS: f32 = 7.;
+    pub const CARD_RADIUS: f32 = 12.;
+    pub const CHIP_RADIUS: f32 = 6.;
+    pub const PANEL_RADIUS: f32 = 12.;
 }
 
 /// 缩放系数的上下限。
@@ -953,6 +956,77 @@ pub fn rounded_stroke(ui: &mut Ui, r: Rect, radius: f32, width: f32, color: Colo
 }
 
 // ============================================================
+// 斜切（skew）—— Phigros 设置页的「平行四边形」语言
+// ============================================================
+//
+// 用户指定的参考版式（`D:\Phigros\kaichang\Setting.html`）里，标签页 / 滑块轨道 /
+// 勾选框 / 箭头框全都用 CSS `transform: skewX(-15deg)` 画成**平行四边形**。
+// 这里把那条规则翻成 lyon 路径：左右边是斜线，顶边与底边水平错开。
+//
+// 以**矩形中心**为原点斜切 —— 与 CSS 默认 `transform-origin: center` 一致，
+// 所以斜切后的图形**中心不变**，文字按未斜切的矩形居中就正好落在视觉中心。
+
+/// 平行四边形路径。
+///
+/// `skew` = **顶边相对底边**的水平位移（世界坐标，正 = 顶边右移，即 CSS 的
+/// `skewX(-15deg)` 观感）。上下各偏 `skew / 2`。
+pub fn skew_path(r: Rect, skew: f32) -> lyon::path::Path {
+    use lyon::math::point;
+    let d = skew * 0.5;
+    let (xl, xr, yt, yb) = (r.x, r.right(), r.y, r.bottom());
+    let mut p = lyon::path::Path::builder();
+    p.begin(point(xl + d, yt));
+    p.line_to(point(xr + d, yt));
+    p.line_to(point(xr - d, yb));
+    p.line_to(point(xl - d, yb));
+    p.end(true);
+    p.build()
+}
+
+/// 把一点按同一条斜切规则变形。
+///
+/// `cy` = 斜切中心的行，`k` = 每单位高度的水平位移（= `-skew / 高度`）。
+pub fn skew_pt(p: (f32, f32), cy: f32, k: f32) -> (f32, f32) {
+    (p.0 + (p.1 - cy) * k, p.1)
+}
+
+/// 斜切矩形填充。
+pub fn skew_rect(ui: &mut Ui, r: Rect, skew: f32, color: Color) {
+    ui.fill_path(&skew_path(r, skew), color);
+}
+
+/// 斜切矩形描边。
+pub fn skew_stroke(ui: &mut Ui, r: Rect, skew: f32, width: f32, color: Color) {
+    ui.stroke_path(&skew_path(r, skew), width, color);
+}
+
+/// Phigros 风格勾选框：**斜切方块**，`on` 时叠一个黑色对勾。
+///
+/// 参考图里开 = 白块 + 黑勾、关 = 暗块 + 弱描边，所以这里按 `on` 分两路画，
+/// 勾线本身也走同一条斜切规则（否则勾和框会歪斜不一致）。
+pub fn skew_check(ui: &mut Ui, r: Rect, skew: f32, on: bool, th: &Theme) {
+    let k = -skew / r.h.max(1e-4);
+    let cy = r.center().y;
+    if on {
+        skew_rect(ui, r, skew, th.white(1.));
+        use lyon::math::point;
+        let a = skew_pt((r.x + r.w * 0.24, cy + r.h * 0.02), cy, k);
+        let b = skew_pt((r.x + r.w * 0.43, r.bottom() - r.h * 0.26), cy, k);
+        let c = skew_pt((r.x + r.w * 0.78, r.y + r.h * 0.26), cy, k);
+        let mut p = lyon::path::Path::builder();
+        p.begin(point(a.0, a.1));
+        p.line_to(point(b.0, b.1));
+        p.line_to(point(c.0, c.1));
+        p.end(false);
+        ui.stroke_path(&p.build(), r.h * 0.15, Color::new(0., 0., 0., 1.));
+    } else {
+        // 关：底块压暗（用主题墨色），加一圈弱描边 —— 浅色主题下也是「一个空框」。
+        skew_rect(ui, r, skew, th.wash(0.14));
+        skew_stroke(ui, r, skew, 0.0016, th.border);
+    }
+}
+
+// ============================================================
 // 开关按钮（替代旧的胶囊开关）
 // ============================================================
 
@@ -998,6 +1072,15 @@ pub fn scaled_rect(r: Rect, sx: f32, sy: f32) -> Rect {
     let w = r.w * sx;
     let h = r.h * sy;
     Rect::new(r.center().x - w * 0.5, r.center().y - h * 0.5, w, h)
+}
+
+/// 卡片 / 按钮的**悬停缩放动效**：光标进入时整块轻微「弹」起（CSS `hover` 的 transform）。
+///
+/// 缩放锚点在矩形中心，所以并排元素之间的间距观感不受影响。
+/// 幅度刻意很小（1.4%）—— 这是「卡片有生命感」而不是「抖动」的分界线。
+pub fn hover_scale(r: Rect, hp: f32) -> Rect {
+    let s = 1. + 0.014 * hp.clamp(0., 1.);
+    scaled_rect(r, s, s)
 }
 
 
@@ -1250,34 +1333,13 @@ pub fn text_diff<'a, 's>(
 /// 磨砂亚克力面板：半透明底 + 1px 描边 + 顶部高光 + 面板内细横纹（磨砂颗粒感）。
 /// 纹理尺寸按世界坐标写死（≈7px 一条 @1080p），不依赖 Metrics。
 pub fn acrylic(ui: &mut Ui, r: Rect, radius: f32, th: &Theme) {
-    // ① 柔光层：几何近似的「背景被糊开」，零状态、无抓屏（见文件上方说明）
-    frosted_halo(ui, r, radius, th);
+    // iOS inset grouped：卡片就是一块**不透明**的圆角实色。
+    // 层级由「页面底 → 卡片底」的明度差提供（浅色 `#F2F2F7` → 纯白）。
     let path = r.rounded(radius);
-    // ② 半透明底板：背景从下面透上来。
-    // 背景模糊管线已删除，铺底的永远是锐利背景，这里固定用标准底板色。
-    let bg = th.bg_elev;
-    ui.fill_path(&path, bg);
-    // ③ 雾面（上半层往下渐隐的白膜）：这是「磨砂」最直观的一层 ——
-    // 对应设计稿 `.glass-btn::before` 那层斜向高光，原来是缺的。
-    // 只铺上半段，渐隐到 0，所以下缘看不出硬边。
-    let haze = Rect::new(r.x, r.y, r.w, r.h * 0.55);
-    ui.fill_path(
-        &haze.rounded(radius),
-        (th.white(if th.dark { 0.055 } else { 0.38 }), (r.x, r.y), th.white(0.), (r.x, r.y + haze.h)),
-    );
-    ui.stroke_path(&path, 0.001, th.border);
-    // 顶部高光（玻璃反光）：加粗加亮，原来 0.001 高、0.10 alpha 基本看不见
-    let hl = Rect::new(r.x + radius * 0.5, r.y + 0.0012, (r.w - radius).max(0.), 0.0018);
-    ui.fill_rect(hl, if th.dark { th.white(0.22) } else { th.white(0.85) });
-    // 磨砂颗粒：细密横线（低 alpha，只加亮不加暗）
-    let step = 0.0073;
-    let mut y = (r.y / step).ceil() * step;
-    while y < r.bottom() {
-        ui.fill_rect(
-            Rect::new(r.x + 0.002, y, (r.w - 0.004).max(0.), 0.0006),
-            if th.dark { th.white(0.032) } else { th.white(0.22) },
-        );
-        y += step;
+    ui.fill_path(&path, th.bg_elev);
+    // 1px 分隔线：iOS 的卡片边界靠它，不靠投影
+    if th.border.a > 0.001 {
+        ui.stroke_path(&path, 0.001, th.border);
     }
 }
 
@@ -1304,12 +1366,10 @@ pub fn hover_step(a: &mut crate::anim::Anim<f32>, on: bool, t: f32) -> f32 {
 }
 
 /// 玻璃按钮的描边色（kaichang `rgba(255,255,255,.18)` → 深色加白 / 浅色加黑）。
-pub fn glass_border(th: &Theme, hp: f32) -> Color {
-    if th.dark {
-        th.white(0.16 + 0.18 * hp)
-    } else {
-        th.black(0.09 + 0.08 * hp)
-    }
+pub fn glass_border(th: &Theme, _hp: f32) -> Color {
+    // iOS：卡片边界恒为那条 1px 分隔线；悬停改的是**底色**（见 `glass_plate_w`），
+    // 不改描边颜色 —— 所以这里不再按 `hp` 提亮。
+    th.border
 }
 
 /// 玻璃面板上的文字色：深色主题纯白，浅色主题主题墨色（**绝不写死纯白**）。
@@ -1323,30 +1383,24 @@ pub fn glass_text(th: &Theme, hp: f32) -> Color {
 
 /// 玻璃面板的外发光（悬停时更亮）。
 pub fn glass_glow(ui: &mut Ui, r: Rect, radius: f32, th: &Theme, hp: f32) {
-    let hi = if th.dark { th.accent_hi } else { th.accent };
-    glow_rect(ui, r, radius, Color { a: 0.10 + 0.14 * hp, ..hi }, radius * 0.8, 6);
+    // iOS 平面风格**不用彩色发光**。这个函数保留（调用点不少），但退化成一层
+    // 极淡的中性投影，且只在悬停时出现 —— 用来把卡片「抬」起来一点点。
+    if hp <= 0.01 {
+        return;
+    }
+    glow_rect(ui, r, radius, th.black(if th.dark { 0.30 } else { 0.08 } * hp), radius * 0.5, 3);
 }
 
-/// **kaichang `.glass-btn` 底板**（世界坐标版）：柔和阴影 + 磨砂亚克力 + 玻璃亮面
-/// + 顶部高光 + 1px 浅边。`tint` 是叠在底板上的强调色（alpha 为 0 表示不叠）。
+/// **iOS 卡片底板**（世界坐标版）：不透明实色 + 悬停淡墨 + 1px 分隔线。
+/// `tint` 是叠在底板上的强调色（alpha 为 0 表示不叠）。
 #[allow(clippy::too_many_arguments)]
 pub fn glass_plate_w(ui: &mut Ui, r: Rect, radius: f32, th: &Theme, hp: f32, tint: Color, border: Color) {
     let radius = radius.min(r.h * 0.5).min(r.w * 0.5);
-    // 柔和阴影：圆角矩形外扩 + alpha 递减（引擎没有高斯模糊的近似）
-    glow_rect(ui, r, radius, th.black(if th.dark { 0.30 + 0.12 * hp } else { 0.16 + 0.08 * hp }), radius * 0.55, 5);
-    // 磨砂亚克力（对应 `backdrop-filter: blur(14px)` 的对应物）
     acrylic(ui, r, radius, th);
-    // 玻璃亮面（kaichang `rgba(255,255,255,.08)` → hover `.14`）
-    rounded(
-        ui,
-        r,
-        radius,
-        if th.dark {
-            th.white(0.05 + 0.06 * hp)
-        } else {
-            th.white(0.24 + 0.22 * hp)
-        },
-    );
+    // 悬停 = 叠一层极淡的墨色（深色加白 / 浅色加黑），不是玻璃提亮
+    if hp > 0.001 {
+        rounded(ui, r, radius, th.wash(0.055 * hp));
+    }
     if tint.a > 1e-3 {
         rounded(
             ui,
@@ -1358,10 +1412,7 @@ pub fn glass_plate_w(ui: &mut Ui, r: Rect, radius: f32, th: &Theme, hp: f32, tin
             },
         );
     }
-    // 顶部那一道玻璃反光
-    let hl = Rect::new(r.x + radius * 0.6, r.y + 0.0012, (r.w - radius * 1.2).max(0.), 0.0012);
-    ui.fill_rect(hl, if th.dark { th.white(0.10 + 0.06 * hp) } else { th.white(0.55) });
-    rounded_stroke(ui, r, radius, 0.0013, border);
+    rounded_stroke(ui, r, radius, 0.001, border);
 }
 
 /// [`glass_plate_w`] 的「设计稿像素」版（`radius` / 反光高度按 [`Metrics`] 换算）。
@@ -1370,12 +1421,35 @@ pub fn glass_plate(ui: &mut Ui, m: &Metrics, r: Rect, radius_px: f32, th: &Theme
     glass_plate_w(ui, r, m.u(radius_px), th, hp, tint, border)
 }
 
-/// 统一玻璃卡片（列表 / 侧栏 / 内容面板）：玻璃底板 + 悬停提亮 + 强调色外发光。
+/// 统一卡片（列表 / 侧栏 / 内容面板）：实色底板 + 悬停淡墨 + 1px 分隔线。
 pub fn glass_card(ui: &mut Ui, r: Rect, radius: f32, th: &Theme, hp: f32) {
-    if hp > 0.01 {
-        glass_glow(ui, r, radius, th, hp);
-    }
+    // iOS 卡片不发光：悬停反馈由 `glass_plate_w` 自己那层淡墨色完成。
     glass_plate_w(ui, r, radius, th, hp, Color::new(0., 0., 0., 0.), glass_border(th, hp));
+}
+
+/// **带可调描边宽度**的卡片底板（世界坐标半径）。
+///
+/// 与 [`glass_plate_w`] 的唯一区别是描边宽度由调用方给（`m.u(1.)` 这类设计稿像素，
+/// 而不是写死世界坐标）。用在「一堆按钮紧密竖排在同一个面板里」的场景。
+#[allow(clippy::too_many_arguments)]
+pub fn glass_plate_flat(ui: &mut Ui, r: Rect, radius: f32, th: &Theme, hp: f32, tint: Color, border: Color, edge: f32) {
+    let radius = radius.min(r.h * 0.5).min(r.w * 0.5);
+    acrylic(ui, r, radius, th);
+    if hp > 0.001 {
+        rounded(ui, r, radius, th.wash(0.055 * hp));
+    }
+    if tint.a > 1e-3 {
+        rounded(
+            ui,
+            r,
+            radius,
+            Color {
+                a: (tint.a * (0.8 + 0.45 * hp)).min(1.),
+                ..tint
+            },
+        );
+    }
+    rounded_stroke(ui, r, radius, edge, border);
 }
 
 /// kaichang `.main-arrow` 的箭头（SVG `M5 12h14M13 6l6 6-6 6`）。
@@ -1516,108 +1590,145 @@ pub fn page_title(ui: &mut Ui, m: &Metrics, th: &Theme, x: f32, cy: f32, title: 
 ///
 /// `label` / `label_en` 对应「开始游玩 / GAME」那种中英双行排版。
 pub fn draw_main_btn(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, label: &str, label_en: &str) {
-    let radius = m.u(14.);
-    // 强调色：深色主题 = kaichang 的青色；浅色主题 = Win11 强调蓝
-    let (tint, border, hi, cn_col, en_col) = if th.dark {
-        (
-            rgba(120, 240, 255, 0.12),
-            rgba(150, 240, 255, 1.),
-            rgba(160, 245, 255, 1.),
-            th.white(1.),
-            rgba(180, 240, 255, 0.78),
-        )
-    } else {
-        (
-            rgba(0, 120, 212, 0.10),
-            rgba(0, 103, 192, 1.),
-            rgba(0, 120, 212, 1.),
-            th.accent,
-            th.with_a(th.teal, 0.85),
-        )
-    };
-    glow_rect(ui, r, radius, Color { a: 0.14 + 0.14 * hp, ..hi }, m.u(11.), 7);
-    glass_plate(ui, m, r, 14., th, hp, tint, Color { a: 0.55 + 0.40 * hp, ..border });
-    rounded(ui, r.feather(-m.u(2.)), radius, Color { a: 0.05 + 0.06 * hp, ..hi });
+    let radius = m.u(12.);
+    // iOS filled button：强调色**实底** + 白字。无描边、无发光，
+    // 悬停只把底色往亮一档推（`accent → accent_hi`）。
+    rounded(ui, r, radius, mix(th.accent, th.accent_hi, hp * 0.5));
 
-    let pad = m.u(24.);
-    let cn = text_tracked(ui, m, label, r.x + pad, r.center().y, 24., cn_col, 4., (0., 0.5), true);
+    let fg = Color::new(1., 1., 1., 1.);
+    let pad = m.u(20.);
+    let cn = text_tracked(ui, m, label, r.x + pad, r.center().y, 20., fg, 2., (0., 0.5), true);
     if !label_en.is_empty() {
-        text_tracked(ui, m, label_en, cn.right() + m.u(12.), r.center().y + m.u(9.), 12., en_col, 2., (0., 1.), false);
+        text_tracked(ui, m, label_en, cn.right() + m.u(10.), r.center().y + m.u(8.), 11., Color::new(1., 1., 1., 0.78), 1.5, (0., 1.), false);
     }
-    let aw = m.u(26.);
+    let aw = m.u(22.);
     let ar = Rect::new(r.right() - pad - aw, r.center().y - aw * 0.5, aw, aw);
     ui.scope(|ui| {
-        ui.dx(hp * m.u(6.));
-        draw_arrow(ui, ar, Color { a: 0.85 + 0.15 * hp, ..hi }, 2.4);
+        ui.dx(hp * m.u(4.));
+        draw_arrow(ui, ar, fg, 2.2);
     });
 }
 
-/// 次级满宽按钮（kaichang `.glass-btn.sec`）：左对齐标签 + 右侧弱化图标。
+/// 次级按钮：iOS **tinted** 样式（强调色 12% 底 + 强调色字），左对齐标签 + 右侧图标。
 pub fn draw_sec_btn(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, label: &str, icon: Icon) {
-    glass_plate(ui, m, r, 14., th, hp, Color::new(0., 0., 0., 0.), glass_border(th, hp));
-    text_tracked(ui, m, label, r.x + m.u(20.), r.center().y, 18., glass_text(th, hp), 3., (0., 0.5), true);
+    rounded(
+        ui,
+        r,
+        m.u(12.),
+        mix(th.with_a(th.accent, 0.12), th.with_a(th.accent, 0.20), hp),
+    );
+    text_tracked(ui, m, label, r.x + m.u(18.), r.center().y, 16., th.accent, 2., (0., 0.5), true);
+    let isz = m.u(16.);
+    draw_icon(
+        ui,
+        m,
+        icon,
+        Rect::new(r.right() - m.u(20.), r.center().y - isz * 0.5, isz, isz),
+        th.accent,
+        1.7,
+    );
+}
+
+/// 中性实底按钮（灰底 + 主题墨色字）——「确定 / 保存」这类不需要强调色的操作。
+pub fn draw_white_btn(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, label: &str) {
+    let radius = m.u(12.).min(r.h * 0.5);
+    rounded(ui, r, radius, mix(th.bg_elev, th.bg_hover, 0.45 + 0.55 * hp));
+    rounded_stroke(ui, r, radius, m.u(1.), th.border);
+    text_tracked(ui, m, label, r.center().x, r.center().y, 16., th.text, 2., (0.5, 0.5), true);
+}
+
+/// 面板最底部的「退出」：iOS destructive 样式（平时透明，悬停转红底红字）。
+pub fn draw_quit_btn(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, label: &str) {
+    let radius = m.u(10.);
+    rounded(ui, r, radius, mix(Color::new(0., 0., 0., 0.), th.with_a(th.red, 0.12), hp));
+    let col = th.red;
+    let size = 15.;
+    let isz = m.u(15.);
+    let tw = tracked_width(ui, m, label, size, 2., false);
+    let x0 = r.center().x - (isz + m.u(8.) + tw) * 0.5;
+    draw_icon(ui, m, Icon::Logout, Rect::new(x0, r.center().y - isz * 0.5, isz, isz), col, 1.8);
+    text_tracked(ui, m, label, x0 + isz + m.u(8.), r.center().y, size, col, 2., (0., 0.5), false);
+}
+
+// ---------- 大号（开始页尺度）的同族按钮 ----------
+//
+// 上面那组（`draw_main_btn` / `draw_sec_btn` / `draw_quit_btn`）是**输入对话框**用的
+// 紧凑尺度；开始页右侧那列按钮用的是设计稿 `.glass-btn` 的原始大尺度
+// （标签 31px / 内边距 44px / 图标 20px）。
+// 两者都保留 —— 不是「两份实现」，而是同一族的两个尺寸档，都调同一套底板
+// （`glass_plate_flat` / `glass_border` / `glass_text` / `hover_scale`），
+// 所以任何一处改玻璃质感，两个尺度同时生效。
+//
+// （原来还有一个紧凑尺度的 `draw_row_btn`，因为「图标 + 文字居中」这个版式
+//   只出现在开始页，没人用，已删掉 —— 现在只有 `draw_row_btn_lg`。）
+
+/// 大号主按钮「开始游玩 / GAME / →」（kaichang `.glass-btn.main`）。
+#[allow(clippy::too_many_arguments)]
+pub fn draw_main_btn_lg(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, label: &str, label_en: &str) {
+    let r = hover_scale(r, hp);
+    let radius = m.u(14.);
+    // iOS filled button：强调色实底 + 白字（无描边、无发光）
+    rounded(ui, r, radius, mix(th.accent, th.accent_hi, hp * 0.5));
+
+    let fg = Color::new(1., 1., 1., 1.);
+    let pad = m.u(36.);
+    let cn = text_tracked(ui, m, label, r.x + pad, r.center().y, 26., fg, 3., (0., 0.5), true);
+    if !label_en.is_empty() {
+        // 小号英文贴在中文右下角（kaichang `.main-en{align-self:flex-end}`）
+        text_tracked(ui, m, label_en, cn.right() + m.u(12.), r.center().y + m.u(10.), 12., Color::new(1., 1., 1., 0.80), 1.5, (0., 1.), false);
+    }
+    // 箭头：悬停往右冲一点
+    let aw = m.u(24.);
+    let ar = Rect::new(r.right() - pad - aw, r.center().y - aw * 0.5, aw, aw);
+    ui.scope(|ui| {
+        ui.dx(hp * m.u(4.));
+        draw_arrow(ui, ar, fg, 2.4);
+    });
+}
+
+/// 大号次级满宽按钮：iOS grouped 行样式（浅灰实底 + 1px 分隔线 + 主题墨色字）。
+pub fn draw_sec_btn_lg(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, label: &str, icon: Icon) {
+    let r = hover_scale(r, hp);
+    let radius = m.u(14.);
+    // 底比卡片（`bg_elev`）略深一档，压在卡片上才看得出边界 —— 这就是 iOS 的灰按钮
+    rounded(ui, r, radius, mix(th.bg_elev, th.bg_hover, 0.45 + 0.55 * hp));
+    rounded_stroke(ui, r, radius, m.u(1.), th.border);
+    text_tracked(ui, m, label, r.x + m.u(36.), r.center().y, 20., th.text, 3., (0., 0.5), true);
     let isz = m.u(18.);
     draw_icon(
         ui,
         m,
         icon,
-        Rect::new(r.right() - m.u(24.), r.center().y - isz * 0.5, isz, isz),
-        mix(th.text_mute, th.accent_hi, hp),
+        Rect::new(r.right() - m.u(36.), r.center().y - isz * 0.5, isz, isz),
+        mix(th.text_mute, th.accent, hp),
         1.7,
     );
 }
 
-/// 白底深字按钮（kaichang `.glass-btn.white`）——「确定 / 保存」这类主操作。
-pub fn draw_white_btn(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, label: &str) {
-    let radius = m.u(14.).min(r.h * 0.5);
-    let bg = mix(th.bg_elev, th.white(if th.dark { 0.92 } else { 1. }), 0.5 + 0.5 * hp);
-    glow_rect(ui, r, radius, th.black(0.10 + 0.08 * hp), m.u(9.), 6);
-    rounded(ui, r, radius, bg);
-    rounded_stroke(ui, r, radius, m.u(1.), if th.dark { th.white(0.25) } else { th.black(0.08) });
-    text_tracked(ui, m, label, r.center().x, r.center().y, 17., th.text_hi, 3., (0.5, 0.5), true);
-}
-
-/// 面板最底部的「退出」：弱化样式（只有悬停才转红）。
-pub fn draw_quit_btn(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, label: &str) {
-    let radius = m.u(10.);
-    rounded(
-        ui,
-        r,
-        radius,
-        if th.dark {
-            th.white(0.03 + 0.04 * hp)
-        } else {
-            th.black(0.025 + 0.03 * hp)
-        },
-    );
-    rounded_stroke(ui, r, radius, m.u(1.), mix(th.wash(0.10), th.with_a(th.red, 0.55), hp));
-    let col = mix(if th.dark { th.white(0.52) } else { th.text_mute }, th.red, hp);
-    let size = 16.;
-    let isz = m.u(16.);
-    let tw = tracked_width(ui, m, label, size, 3., false);
-    let x0 = r.center().x - (isz + m.u(9.) + tw) * 0.5;
-    draw_icon(ui, m, Icon::Logout, Rect::new(x0, r.center().y - isz * 0.5, isz, isz), col, 1.8);
-    text_tracked(ui, m, label, x0 + isz + m.u(9.), r.center().y, size, col, 3., (0., 0.5), false);
-}
-
-/// 图标 + 文字整体居中的玻璃按钮（开始页「设置 / 活动 / 消息」那一排）。
+/// 大号并排按钮（设置 / 活动 / 消息 / 关于）：图标 + 标签整体居中。
 #[allow(clippy::too_many_arguments)]
-pub fn draw_row_btn(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, label: &str, icon: Icon, badge: bool, t: f32) {
-    glass_plate(ui, m, r, 14., th, hp, Color::new(0., 0., 0., 0.), glass_border(th, hp));
-    let size = 18.;
+pub fn draw_row_btn_lg(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, label: &str, icon: Icon, badge: bool, t: f32) {
+    let r = hover_scale(r, hp);
+    let radius = m.u(14.);
+    rounded(ui, r, radius, mix(th.bg_elev, th.bg_hover, 0.45 + 0.55 * hp));
+    rounded_stroke(ui, r, radius, m.u(1.), th.border);
+
+    let size = 19.;
     let isz = m.u(18.);
-    let tw = tracked_width(ui, m, label, size, 3., true);
-    let x0 = r.center().x - (isz + m.u(10.) + tw) * 0.5;
+    let tw = tracked_width(ui, m, label, size, 2., true);
+    let x0 = r.center().x - (isz + m.u(9.) + tw) * 0.5;
     draw_icon(
         ui,
         m,
         icon,
         Rect::new(x0, r.center().y - isz * 0.5, isz, isz),
-        mix(th.text_dim, th.accent_hi, hp),
+        mix(th.text_dim, th.accent, hp),
         1.8,
     );
-    let lr = text_tracked(ui, m, label, x0 + isz + m.u(10.), r.center().y, size, glass_text(th, hp), 3., (0., 0.5), true);
+    let lr = text_tracked(ui, m, label, x0 + isz + m.u(9.), r.center().y, size, th.text, 2., (0., 0.5), true);
+
     if badge {
+        // 有新消息：标签右边的呼吸红点（设计稿 `dotPulse` 2.2s）
         let dp = pulse(t, 2.2, 0.);
         ui.fill_circle(
             lr.right() + m.u(9.),
@@ -1629,6 +1740,22 @@ pub fn draw_row_btn(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, labe
             },
         );
     }
+}
+
+/// 大号「退出」：弱化样式（只有悬停才转红）。
+pub fn draw_quit_btn_lg(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, label: &str) {
+    let r = hover_scale(r, hp);
+    let radius = m.u(10.);
+    // iOS destructive：平时透明，悬停铺一层 12% 红底
+    rounded(ui, r, radius, mix(Color::new(0., 0., 0., 0.), th.with_a(th.red, 0.12), hp));
+
+    let col = th.red;
+    let size = 15.;
+    let isz = m.u(15.);
+    let tw = tracked_width(ui, m, label, size, 2., false);
+    let x0 = r.center().x - (isz + m.u(8.) + tw) * 0.5;
+    draw_icon(ui, m, Icon::Logout, Rect::new(x0, r.center().y - isz * 0.5, isz, isz), col, 1.8);
+    text_tracked(ui, m, label, x0 + isz + m.u(8.), r.center().y, size, col, 2., (0., 0.5), false);
 }
 
 /// 列表行（世界坐标）：玻璃行卡 + 左图标 + 标题 + 副标题（弱化）+ 右值。
@@ -1691,6 +1818,104 @@ pub fn draw_list_row(
             .color(th.text_dim)
             .draw();
     }
+}
+
+// ============================================================
+// iOS 分组列表（inset grouped）
+// ============================================================
+//
+// iOS 的列表语言：**一整组共用一个圆角容器**，行与行之间用**内缩的发丝线**分隔，
+// 只有整组的**上下两端**才有圆角。跟「每行一张独立圆角卡 + 行间距」是两种观感。
+//
+// 用法（页面自己知道组里有几行时最省事）：
+//
+// ```ignore
+// let n = items.len();
+// newui::group_plate(ui, &th, group_rect, m.u(px::CARD_RADIUS)); // ① 先铺容器
+// for (i, it) in items.iter().enumerate() {
+//     let r = row_rect(i);
+//     newui::group_row(ui, &th, r, hp, i == 0, i + 1 == n, radius, m.u(14.)); // ② 再画行
+//     // …行内容…
+// }
+// ```
+//
+// ⚠️ **容器必须在画任何一行之前铺好**。这是即时模式：晚画就会盖住已经画好的行内容，
+// 所以「回头给上一行补下圆角」这条路走不通 —— 上一行的文字已经压在它的填充之上了。
+// 结论：整组一个圆角容器**要求页面先知道总行数**。
+
+/// 分组容器：整组的圆角实色底（不画分隔线，线由 [`group_row`] 画）。
+pub fn group_plate(ui: &mut Ui, th: &Theme, r: Rect, radius: f32) {
+    if flat_groups() {
+        // 扁平模式（Phigros 设置页）：不铺卡片底 —— 行直接落在页面底上。
+        return;
+    }
+    let radius = radius.min(r.h * 0.5).min(r.w * 0.5);
+    let path = r.rounded(radius);
+    ui.fill_path(&path, th.bg_elev);
+    if th.border.a > 0.001 {
+        ui.stroke_path(&path, 0.001, th.border);
+    }
+}
+
+/// 分组里的一行。
+///
+/// **不填底板**（底板来自 [`group_plate`] 或外层面板），只叠悬停/选中高亮，
+/// 并在行底画一条**内缩 `divider_inset` 的发丝线**（`last` 为 true 时不画）。
+///
+/// `radius`：行的外缘圆角。
+/// * 行**本身就是容器**（整组 = 这几行）→ 传卡片圆角（如 `m.u(px::CARD_RADIUS)`）；
+/// * 行**内嵌在面板里**（行比容器窄）→ 传 `0.`，悬停就是一块方角高亮。
+#[allow(clippy::too_many_arguments)]
+pub fn group_row(ui: &mut Ui, th: &Theme, r: Rect, hp: f32, first: bool, last: bool, radius: f32, divider_inset: f32, tint: Color) {
+    // 两层叠加，顺序固定：先调用方给的强调色（选中态），再悬停墨色。
+    for col in [tint, th.wash(0.055 * hp)] {
+        if col.a <= 0.001 {
+            continue;
+        }
+        if radius <= 0.0005 {
+            ui.fill_rect(r, col);
+        } else {
+            // 只有整组的首/末行才有圆角；中间行与「朝组内那一侧」的圆角落在行外，
+            // 用 `scissor` 裁掉，就不会在行与行之间留下月牙形缺口。
+            let big = match (first, last) {
+                (true, true) => r,
+                (true, false) => Rect::new(r.x, r.y, r.w, r.h + radius),
+                (false, true) => Rect::new(r.x, r.y - radius, r.w, r.h + radius),
+                (false, false) => r.feather(radius),
+            };
+            ui.scissor(r, |ui| rounded(ui, big, radius, col));
+        }
+    }
+    if !last && !flat_groups() && th.border.a > 0.001 {
+        let y = r.bottom() - 0.0005;
+        ui.fill_rect(
+            Rect::new(r.x + divider_inset, y, (r.w - divider_inset).max(0.), 0.001),
+            th.border,
+        );
+    }
+}
+
+thread_local! {
+    /// 分组列表是否走「扁平」模式（Phigros 设置页）。
+    ///
+    /// 为真时 [`group_plate`] 不铺卡片底、[`group_row`] 不画分隔线 —— 各行直接
+    /// 落在页面底上，靠留白分隔。只在该页渲染期间置位，渲染完复位。
+    static FLAT_GROUPS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 设置 / 复位「扁平分组」模式（见 [`FLAT_GROUPS`]）。
+pub fn set_flat_groups(v: bool) {
+    FLAT_GROUPS.with(|c| c.set(v));
+}
+
+/// 当前是否处于「扁平分组」模式。
+pub fn flat_groups() -> bool {
+    FLAT_GROUPS.with(|c| c.get())
+}
+
+/// 分组标题：小号、弱化、带字距，落在整组的上方（iOS 的 section header）。
+pub fn section_header(ui: &mut Ui, m: &Metrics, th: &Theme, x: f32, y: f32, text: &str) {
+    text_tracked(ui, m, text, x, y, 12., th.text_mute, 1.2, (0., 0.5), true);
 }
 
 /// 图标绘制需要一份 [`Metrics`]（`draw_icon` 的签名如此），但世界坐标下的
@@ -2059,91 +2284,32 @@ pub fn status_extra() -> Option<(String, String)> {
 
 
 // ============================================================
-// 页面级背景：纯深黑灰底 → **光波**（TriGrid）→ 环境光 → 暗角
+// 页面级背景：**iOS 分组底纯色**
 // ============================================================
 //
-// 光波 = 用户提供的 `kaichang/trigrid_preview.html` + `trigrid.glsl` 那套实现，
-// 移植在 `prpr::core::trigrid` 里。**底色是纯色**（用户要求：不用 beijing 底图），
-// 光波作为半透明层叠在纯色底上。
+// 【2026-10-09 改版】原来是「恒定深黑灰底 → TriGrid 光波 → 三团环境光 → 暗角」。
+// 用户要求改成 iOS 18 平面风格后，这一整条全部退役：
+//
+//   * 光波（TriGrid）是**加色辉光**，只有在深色底上才成立 —— 压到 `#F2F2F7`
+//     这种浅色分组底上什么都看不见，跟平面风格直接冲突；
+//   * 三团环境光斑与暗角同样是给「深色氛围」服务的，平面风格里没有位置。
 //
 // 它是所有页面共用的统一背景入口：`MainScene::render` 每帧调一次，页面内容再画在
-// 它上面，所以曲库 / 设置 / 活动 / 消息 / 资源包 / 关于……都走这里，看到的是同一层
-// 光波。自带背景的场景（打歌 / 结算 / 加载，走 `prpr::scene::draw_background`）
+// 它上面，所以曲库 / 设置 / 活动 / 消息 / 资源包 / 关于……都走这里。
+// 自带背景的场景（打歌 / 结算 / 加载，走 `prpr::scene::draw_background`）
 // 与本函数无关，不去动它们。
 //
-// 设计稿原来的 `.grid-bg`（55px 移动线网格）被光波取代（两套网格叠一起太花）；
-// 贴图或 shader 不可用时自动退回 `.grid-bg`，见下面的降级分支。
+// ⚠️ 浅色主题下页面底现在是**浅色**的（`#F2F2F7`），所以「压在页面底上的写死白字」
+// 会失效 —— 那些地方要改用 `th.text*` / `theme::ink`。只有压在封面图 / 曲绘 /
+// 视频上的文字才继续写死白。
 
-/// 页面背景：**纯深黑灰底**（`base` 参数保留但已不使用）→ 光波 → 环境光 → 暗角。
-pub fn draw_background(ui: &mut Ui, m: &Metrics, th: &Theme, t: f32, base: Option<SafeTexture>) {
-    let sr = ui.screen_rect();
-
-    // **纯深黑灰底**（用户要求：不用 beijing 图片底）。
-    // ⚠️ 必须固定深色、与主题无关：kaichang 原版 canvas 的底就是纯黑，而光波是「加色辉光」。
-    // 之前这里写 `th.bg`，在浅色主题下变成 #f3f3f3 白底 → 光波压上去完全看不见，
-    // 用户反馈「背景是白的」「光波不还原」。
+/// 页面背景：`systemGroupedBackground` 纯色（浅 `#F2F2F7` / 深纯黑）。
+///
+/// `_m` / `_t` / `base` 三个参数保留只为不改 `MainScene` 的调用点，现在都不使用。
+pub fn draw_background(ui: &mut Ui, _m: &Metrics, th: &Theme, _t: f32, base: Option<SafeTexture>) {
     let _ = base;
-    ui.fill_rect(sr, Color::new(0.051, 0.055, 0.063, 1.));
-
-    // ---------- 光波（TriGrid，半透明叠在深色底上） ----------
-    // 返回 false = 贴图缺失 / shader 编译失败（已 warn 一次），退回原来的移动网格。
-    // 固定用**原版深色配色**：底已是深黑灰，浅色主题那套「墨线」参数在这里不适用。
-    if !draw_trigrid(ui, sr, t, true) {
-        draw_grid(ui, m, th, sr, t);
-    }
-
-    // ---------- 环境光（.ambient 的三团，26s / 32s / 38s 漂浮） ----------
-    //
-    // ⚠️ CSS 里的 `52vmax` 是「52% 的较大视口边」，不是 52 倍 —— 第一版按 52 倍
-    // 写，光斑半径覆盖了整个屏幕，表现成「背景糊成一片灰」而不是角落的一团光。
-    let vmax = m.w.max(m.h) * 2. / m.w; // 100vmax 对应的世界坐标长度
-    let breathe = |period: f32, phase: f32| ((t / period) * std::f32::consts::TAU + phase).sin() * 0.5 + 0.5;
-    let glow = |ui: &mut Ui, cx: f32, cy: f32, r: f32, col: Color| {
-        ui.fill_rect(sr, radial((cx, cy), r, col, Color::new(col.r, col.g, col.b, 0.)));
-    };
-
-    // .amb-1：52vmax 蓝，top:-24vmax right:-14vmax
-    let b1 = breathe(26., 0.);
-    glow(
-        ui,
-        sr.right() - 0.12 * vmax + b1 * vmax * 0.05,
-        sr.y + 0.02 * vmax - b1 * vmax * 0.04,
-        0.26 * vmax,
-        if th.dark { rgba(0, 122, 204, 0.30) } else { rgba(11, 107, 203, 0.16) },
-    );
-    // .amb-2：44vmax 青，bottom:-22vmax left:-12vmax
-    let b2 = breathe(32., 1.7);
-    glow(
-        ui,
-        sr.x + 0.10 * vmax - b2 * vmax * 0.05,
-        sr.bottom() + b2 * vmax * 0.03,
-        0.22 * vmax,
-        if th.dark { rgba(62, 184, 160, 0.16) } else { rgba(15, 138, 114, 0.11) },
-    );
-    // .amb-3：36vmax 蓝，bottom:-18vmax right:26%
-    let b3 = breathe(38., 3.1);
-    glow(
-        ui,
-        sr.right() - 0.26 * sr.w - 0.18 * vmax + b3 * vmax * 0.04,
-        sr.bottom() - b3 * vmax * 0.025,
-        0.18 * vmax,
-        if th.dark { rgba(74, 142, 194, 0.14) } else { rgba(11, 107, 203, 0.09) },
-    );
-
-    // ---------- 暗角（.vignette） ----------
-    ui.fill_rect(
-        sr,
-        radial(
-            (0., sr.y * 0.04),
-            1.70,
-            Color::new(0., 0., 0., 0.),
-            if th.dark {
-                Color::new(0., 0., 0., 0.62)
-            } else {
-                Color::new(0.55, 0.6, 0.68, 0.16)
-            },
-        ),
-    );
+    // 卡片（`th.bg_elev`）压在它上面，靠明度差分出层级 —— 这就是 iOS 的 inset grouped。
+    ui.fill_rect(ui.screen_rect(), th.bg);
 }
 
 

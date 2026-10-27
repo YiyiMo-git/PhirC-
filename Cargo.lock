@@ -1242,7 +1242,7 @@ checksum = "ea5190182e6915eb873ddbc16e23b711b6eb1f9c00a0d0a3a91b5f6228475225"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.6",
+ "syn 3.0.7",
 ]
 
 [[package]]
@@ -3902,6 +3902,7 @@ dependencies = [
  "daachorse",
  "dashmap 6.1.0",
  "dotenv-build",
+ "flate2",
  "fluent",
  "fluent-syntax",
  "futures-util",
@@ -4272,6 +4273,7 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "zip",
+ "zstd",
 ]
 
 [[package]]
@@ -5470,9 +5472,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.6"
+version = "3.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
+checksum = "d62a2e0561533f2ca2561d0cf27fd9fedb640a1bf2616ff5d5c80d99017faadc"
 dependencies = [
  "proc-macro2",
  "quote",

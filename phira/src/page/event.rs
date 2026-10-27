@@ -9,7 +9,7 @@ use macroquad::prelude::*;
 use nalgebra::Rotation2;
 use prpr::{
     core::Tweenable,
-    ext::{semi_black, semi_white, RectExt, SafeTexture, ScaleType},
+    ext::{semi_black, RectExt, SafeTexture, ScaleType},
     scene::{show_error, NextScene},
     task::Task,
     ui::{button_hit_large, DRectButton, RectButton, Scroll, Ui},
@@ -228,7 +228,11 @@ impl Page for EventPage {
                                         .pos(r.x + Self::LB_PAD, sy)
                                         .anchor(0., 1.)
                                         .size(0.42)
-                                        .color(semi_white(0.82))
+                                        // 副标题和上面的曲名压在**同一张插图**上（插图底下叠了
+                                        // `semi_black(0.4)`，恒深）→ 必须跟曲名一样写死白。
+                                        // 原来这里用 `semi_white`，浅色主题下会翻成深色，配着
+                                        // 上面那层黑投影正好糊成一团看不见。
+                                        .color(Color::new(1., 1., 1., 0.82))
                                         .draw();
                                 }
                             });

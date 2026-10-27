@@ -24,19 +24,25 @@ on:
 permissions:
   contents: read
 
+# prpr-avc 的 FFmpeg 静态库版本（必须用 20260730_v0：更早的包里 AVStream 布局与
+# prpr-avc 绑定不匹配，一开视频就崩；20260730 起的 iOS 包才是真 iOS 对象）。
+env:
+  PRPR_AVC_FFMPEG_VERSION: 20260730_v0
+
 # 同一分支/标签重复触发时自动取消旧的一次，省额度（不想要就删掉这两行）
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 # 关于 video 功能 / FFmpeg：
-# 上游 prpr-avc-ffmpeg 的 aarch64-apple-ios 静态库实际是 macOS 平台的对象文件，
-# 真正链接 iOS 时会报 "building for 'iOS', but linking in object file ... built for 'macOS'"，
-# 所以这里改成 --no-default-features 构建（关掉 video），完全不依赖 FFmpeg：
-# phira.xcodeproj 的 Cargo Build 阶段已加 --no-default-features，`check` job 也一致。
-# 代价：不支持谱面的 unlock 视频（代码里有 not(feature = "video") 的降级分支，功能不受影响）。
-# 想恢复 video：去掉那两个 --no-default-features，并重新加上 FFmpeg 静态库下载步骤
-# （版本与 .github/workflows/check.yml 的 PRPR_AVC_FFMPEG_VERSION 保持一致）。
+# **2026-10-25 起 video 已启用**。旧注释说「上游 aarch64-apple-ios 静态库实际是 macOS 对象文件」
+# —— 那是 20260309/20260330 两个包的问题；20260730_v0（FFmpeg 8.0）的 iOS 包已修好：
+#   设备包 = LC_VERSION_MIN_IPHONEOS，模拟器包 = LC_BUILD_VERSION platform=7(iOS 模拟器)。
+# 同时旧包（FFmpeg 5.1）的 AVStream 布局与 prpr-avc 绑定不匹配，开视频必崩（STATUS_ACCESS_VIOLATION），
+# 所以版本必须 ≥ 20260730_v0。
+# phira.xcodeproj 的 Cargo Build 阶段：底座仍是 --no-default-features，库目录存在时追加
+# --features video（Intel 模拟器的 x86_64-apple-ios 官方没发包 → 自动降级为不带 video）。
+# 代价/收益：支持谱面 unlock 视频与 witness 视频（素材在 assets/video/）。
 #
 # 关于共存（和官方 Phira 同时安装）：
 # 仅需 Bundle ID 不同。iOS 按 Bundle ID 分配独立的容器，数据在 <容器>/Library/data（见 phira/src/lib.rs），
@@ -69,12 +75,11 @@ jobs:
           cache-on-failure: "true"
           cache-all-crates: "true"
 
-      # --no-default-features 关掉 video（不依赖 FFmpeg）；--features webui 打开
-      # WebView 开始页（iOS 侧 = WebKit 的 WKWebView + phira/ios/webui.m 胶水）。
-      # 注意：这里跑 cargo check 也会执行 build.rs，所以能顺带验证 webui.m 能否编译
-      # （Objective-C 语法错误会在这里暴露出来，不必等到出 IPA）。
+      # video 已启用（FFmpeg 静态库在 IPA job 里下载；check 只做类型检查、不链接）。
+      # 注意：这里跑 cargo check 也会执行 build.rs，所以能顺带验证 phira/ios/ime.m
+      # （软键盘桥）能否编译 —— Objective-C 语法错误会在这里暴露，不必等到出 IPA。
       - name: cargo check
-        run: cargo check -p phira-main --no-default-features --features webui
+        run: cargo check -p phira-main --no-default-features --features video
 
   ipa:
     name: Build unsigned IPA
@@ -126,8 +131,21 @@ jobs:
           cache-on-failure: "true"
           cache-all-crates: "true"
 
-      # 不再下载 FFmpeg：Cargo Build 阶段用 --no-default-features 关掉了 video 功能（原因见文件开头的说明）
-      - name: Verify video feature is off
+      # 现在支持 video：先下载 FFmpeg 静态库（设备 + 模拟器两个目标）。
+      # 缺库时 phira.xcodeproj 的 Cargo Build 阶段会自动降级为不带 video 构建。
+      - name: Download FFmpeg static libs (prpr-avc)
+        run: |
+          set -euo pipefail
+          for T in aarch64-apple-ios aarch64-apple-ios-sim; do
+            mkdir -p "prpr-avc/static-lib/$T"
+            curl -sSL --retry 3 -o "avc-libs-$T.tar.gz" \
+              "https://github.com/TeamFlos/prpr-avc-ffmpeg/releases/download/${PRPR_AVC_FFMPEG_VERSION}/$T.tar.gz"
+            tar -xzf "avc-libs-$T.tar.gz" -C "prpr-avc/static-lib/$T"
+            ls -la "prpr-avc/static-lib/$T/"
+          done
+
+      # 构建脚本仍以 --no-default-features 为底，video 由 $VIDEO_FLAG 追加；这里只断言底座还在。
+      - name: Verify build phase baseline flags
         run: grep -q -- '--no-default-features' phira.xcodeproj/project.pbxproj
 
       # assets/font.ttf 与 assets/background.jpg 被 .gitignore 忽略、仓库里没有，

@@ -16,7 +16,7 @@ mod loading;
 pub use loading::{BasicPlayer, LoadingScene, SaveFn, UpdateFn, UploadFn};
 
 use crate::{
-    ext::{draw_image, draw_parallelogram, screen_aspect, LocalTask, SafeTexture, ScaleType},
+    ext::{draw_image, draw_image_alpha, draw_parallelogram, screen_aspect, LocalTask, SafeTexture, ScaleType},
     judge::Judge,
     time::TimeManager,
     ui::{BillBoard, Dialog, Message, MessageHandle, MessageKind, TextPainter, Ui},
@@ -275,7 +275,10 @@ pub fn has_pending_input() -> bool {
 ///
 /// 挂在 [`Main::render`] 的 `top_level` 分支里（和引擎自带 `DIALOG` 同一位置）
 /// 才能对所有场景生效。回调签名与 `phira` 的 `input_dialog::render` 一致。
-static INPUT_DIALOG_RENDERER: Mutex<Option<fn(&mut Ui, f32)>> = Mutex::new(None);
+/// 自绘输入框的绘制函数签名。
+type InputDialogRenderer = fn(&mut Ui, f32);
+
+static INPUT_DIALOG_RENDERER: Mutex<Option<InputDialogRenderer>> = Mutex::new(None);
 
 /// 注册自绘输入框的绘制函数（`phira` 启动时调用一次，之后每帧由引擎调用）。
 pub fn set_input_dialog_renderer(f: fn(&mut Ui, f32)) {
@@ -587,6 +590,22 @@ impl Main {
                 touches.retain_mut(|touch| {
                     let t = self.last_update_time + (index + 1) as f64 * delta;
                     index += 1;
+                    // 自绘输入框挂着时：**模态拦截** —— 触摸不派发给场景。
+                    //
+                    // ⚠️ 必须在这里（引擎层）拦，不能只在 `MainScene::touch` 里拦：
+                    // 输入框的绘制回调挂在 `Main::render` 的 `top_level`（对所有场景生效），
+                    // 而 `MainScene::touch` 只有栈顶是 `MainScene` 时才被调用。
+                    // 栈顶是独立场景时（`GameScene` 的练习模式时间输入、
+                    // `SongScene` 的举报理由 / 稳定度评论、`ProfileScene` 的转移邮箱）
+                    // 原来**没有任何拦截** —— 点「确定 / 取消 / 退格 / 清空」这一下会
+                    // 同时打到输入框**和**底下的场景，等于穿透。
+                    //
+                    // 返回 `false` = **保留**这个触摸在列表里（`retain_mut` 的语义是
+                    // `false` 保留）：场景收不到，但 `ui.touches()` 仍然读得到，
+                    // 输入框自己的按钮命中就靠它。和上面 `DIALOG` 分支同一套写法。
+                    if has_pending_input() {
+                        return false;
+                    }
                     let mut guard = it.borrow_mut();
                     if let Some(dialog) = guard.as_mut() {
                         if !dialog.touch(touch, t as _) {
@@ -700,6 +719,15 @@ fn draw_background(tex: Texture2D) {
     let top = 1. / asp;
     draw_image(tex, Rect::new(-1., -top, 2., top * 2.), ScaleType::CropCenter);
     draw_rectangle(-1., -top, 2., top * 2., Color::new(0., 0., 0., 0.3));
+}
+
+/// 半透明背景：帧缓冲累积（Phi Recorder 的 `preserve_framebuffer`）时，
+/// 每帧用 `fade` 的不透明度把背景补回来，这样上一帧的物体才不会被背景糊掉，
+/// 同时背景本身收敛到正常亮度（不会越来越黑）。
+fn draw_background_alpha(tex: Texture2D, color: Color) {
+    let asp = screen_aspect();
+    let top = 1. / asp;
+    draw_image_alpha(tex, Rect::new(-1., -top, 2., top * 2.), ScaleType::CropCenter, color);
 }
 
 /// The rect a chart illustration occupies when laid out in the classic (prpr)

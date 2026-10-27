@@ -26,20 +26,60 @@ fn main() {
     println!("cargo:rustc-env=GIT_HASH={}", git_hash);
 
     build_ios_motion();
-    build_ios_webui();
+    build_ios_ime();
+    build_ios_webview();
+    build_ios_video();
 }
 
-/// iOS：WebView 开始页宿主（WKWebView），用 Objective-C 包一层。
+/// iOS：离线渲染的视频编码器（AVAssetWriter / VideoToolbox）。
 ///
-/// 与 [`build_ios_motion`] 同一套路：只在 iOS 目标下编，其它平台完全跳过，
-/// 所以 Windows / Android 构建不受影响。WebKit / UIKit 都是系统框架，让链接器带上即可。
-fn build_ios_webui() {
+/// 与 `build_ios_ime` 同套路：只在 iOS 目标下编，其它平台跳过。
+/// 接口声明在 `phira/src/record.rs` 的 `ios_sink` 模块（C 边界：
+/// `phira_video_start/append/finish/cancel/last_path`）。MRC，不开 ARC。
+fn build_ios_video() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os != "ios" {
         return;
     }
-    println!("cargo:rerun-if-changed=ios/webui.m");
-    cc::Build::new().file("ios/webui.m").compile("phira_webui_ios");
+    println!("cargo:rerun-if-changed=ios/video_encoder.m");
+    cc::Build::new().file("ios/video_encoder.m").compile("phira_video_ios");
+    println!("cargo:rustc-link-lib=framework=AVFoundation");
+    println!("cargo:rustc-link-lib=framework=CoreVideo");
+    println!("cargo:rustc-link-lib=framework=CoreMedia");
+    println!("cargo:rustc-link-lib=framework=Foundation");
+}
+
+/// iOS：软键盘桥（隐藏 `UITextField`），用 Objective-C 包一层。
+///
+/// 与 [`build_ios_motion`] 同一套路：只在 iOS 目标下编，其它平台完全跳过，
+/// 所以 Windows / Android 构建不受影响。UIKit / Foundation 都是系统框架，
+/// 让链接器带上即可。（历史：这些代码原在 `ios/webui.m`，随 WKWebView 宿主一起；
+/// WebView 界面移除后拆成 `ios/ime.m`，但软键盘通道必须保留。）
+fn build_ios_ime() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os != "ios" {
+        return;
+    }
+    println!("cargo:rerun-if-changed=ios/ime.m");
+    cc::Build::new().file("ios/ime.m").compile("phira_ime_ios");
+    println!("cargo:rustc-link-lib=framework=UIKit");
+    println!("cargo:rustc-link-lib=framework=Foundation");
+}
+
+/// iOS：WebView 界面宿主（WKWebView + `phirc://` 自定义协议 scheme handler）。
+///
+/// 与 [`build_ios_ime`] 同套路：只在 iOS 目标下编，其它平台完全跳过。
+/// C 边界函数（`phira_webui_create/navigate/set_visible/eval/destroy`）由
+/// `phira/src/webui.rs` 的 iOS 段 extern 声明；Rust → ObjC 的两个回调
+/// （`phira_webui_ipc` / `phira_webui_asset`）也在那段里 `#[no_mangle]` 导出。
+/// MRC（不启用 ARC，与 motion.m / ime.m 一致，静态对象手动 release）。
+fn build_ios_webview() {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os != "ios" {
+        return;
+    }
+    println!("cargo:rerun-if-changed=ios/webview.m");
+    cc::Build::new().file("ios/webview.m").compile("phira_webview_ios");
     println!("cargo:rustc-link-lib=framework=WebKit");
     println!("cargo:rustc-link-lib=framework=UIKit");
     println!("cargo:rustc-link-lib=framework=Foundation");

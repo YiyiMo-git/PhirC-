@@ -1,6 +1,9 @@
 mod blacklist;
 pub use blacklist::BlacklistPage;
 
+mod chart_toolbox;
+pub use chart_toolbox::ChartToolboxPage;
+
 /// 最佳谱面榜（T7.2）。
 pub mod best_board;
 pub use best_board::BestBoard;
@@ -28,7 +31,7 @@ pub use home::HomePage;
 mod history;
 pub use history::HistoryPage;
 
-mod library;
+pub mod library;
 pub use library::{request_export, resolve_export, take_export, ExportInfo, LibraryPage, CHOOSE_COVER, CHOSEN_COVER, FAV_UPDATED};
 
 mod message;
@@ -47,8 +50,6 @@ pub use rks::RksPanel;
 mod settings;
 pub use settings::SettingsPage;
 
-pub mod song_detail;
-pub use song_detail::SongDetailPage;
 
 mod timing_editor;
 pub use timing_editor::TimingEditor;
@@ -595,6 +596,13 @@ pub trait Page {
         Ok(())
     }
     fn on_back_pressed(&mut self, _s: &mut SharedState) -> bool {
+        false
+    }
+
+    /// 这个页面是否要求深色外壳（场景层的返回键等跟着变深）。
+    ///
+    /// 默认 `false`（跟全局主题）；谱面工具箱等「固定深色」的页面覆盖成 `true`。
+    fn prefers_dark(&self) -> bool {
         false
     }
 }

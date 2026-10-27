@@ -3,7 +3,7 @@ use macroquad::prelude::*;
 use prpr::{
     config::Config,
     core::{demux_audio, Anim, Keyframe, Video},
-    ext::{create_audio_manger, semi_black, semi_white, SafeTexture, ScaleType},
+    ext::{create_audio_manger, semi_black, SafeTexture, ScaleType},
     fs::FileSystem,
     info::ChartInfo,
     scene::{BasicPlayer, GameMode, LoadingScene, NextScene, SaveFn, Scene, UpdateFn, UploadFn},
@@ -53,10 +53,16 @@ impl UnlockScene {
         save_fn: Option<SaveFn>,
         preloaded: Option<(prpr::ext::SafeTexture, prpr::ext::SafeTexture, Color)>,
     ) -> Result<UnlockScene> {
-        let bytes = fs
-            .load_file(&info.unlock_video.clone().unwrap_or_else(|| "unlock.mp4".to_owned()))
-            .await
-            .context("Cannot find unlock video file!")?;
+        let video_name = info.unlock_video.clone().unwrap_or_else(|| "unlock.mp4".to_owned());
+        // 谱包内优先；谱包没有时回落到内置官方视频（assets/video/）。
+        // 原游戏的解锁视频是**内置资源**，谱面 info 只写文件名 —— 没有兜底的话，
+        // 官方谱面（或没打包视频的谱面）一按播放就「Cannot find unlock video file」直接开局失败。
+        let bytes = match fs.load_file(&video_name).await {
+            Ok(bytes) => bytes,
+            Err(_) => macroquad::file::load_file(&format!("video/{video_name}"))
+                .await
+                .with_context(|| format!("Cannot find unlock video file: {video_name}（谱包与内置视频均没有）"))?,
+        };
         let video = Video::new(bytes, 0., ScaleType::Inside, Anim::new(vec![Keyframe::new(0., 1., 0)]), Anim::default())?;
         let clip = demux_audio(video.video_file().path().to_str().unwrap())?;
         let music_length = clip.as_ref().map_or(0., AudioClip::length);
@@ -221,7 +227,9 @@ impl Scene for UnlockScene {
                         1. - pad,
                         top - pad,
                         t as f32,
-                        semi_white(alpha),
+                        // 转圈压在**全屏视频**上（恒深），同上面那个 `WHITE` 的分支保持一致：
+                        // 写死白，不能走主题墨色（浅色主题下会变深色而看不见）。
+                        Color::new(1., 1., 1., alpha),
                         LoadingParams {
                             width: 0.01,
                             radius: 0.04,

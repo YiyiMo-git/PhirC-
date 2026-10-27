@@ -15,21 +15,17 @@
 //!
 //! 所以 30 个调用点的消费链路一行都不用改。
 //!
-//! # ⚠️ 生效范围（重要，别当成「全局弹窗」）
+//! # 生效范围
 //!
-//! 引擎每帧**只渲染场景栈顶的那个场景**（`prpr::scene::Main::render` →
-//! `scenes.last_mut().render(..)`），而本函数只由 `MainScene::render` 调用。因此：
+//! 绘制回调由 `phira` 启动时注册到 [`prpr::scene::set_input_dialog_renderer`]，
+//! 引擎把它挂在 `prpr::scene::Main::render` 的 `top_level` 分支（和引擎自带 `DIALOG`
+//! 同一位置），所以**对所有场景都生效** —— 包括独立场景（`GameScene` 的练习模式
+//! 时间输入、`SongScene` 的举报理由 / 稳定度评论、`ProfileScene` 的转移邮箱等）。
 //!
-//! * **生效**：`MainScene` 内部发出的请求 —— 设置 / 曲库 / 收藏 / 历史 / 黑名单 /
-//!   标签 / 联机面板 / 登录 / RKS 等页面，以及 `tags.rs`、`mp/panel.rs` 这些模块；
-//! * **不生效**：独立场景（`phira` 的 `SongScene` / `ProfileScene` /
-//!   `ChallengeScene` / `EventScene` / `ChapterScene` / `UnlockScene`，以及
-//!   `prpr` 的 `GameScene`）里发出的 `request_input` —— 那些场景在栈顶时
-//!   `MainScene::render` 根本不会被调用，请求会一直挂在 [`prpr::scene::PENDING_INPUT`]
-//!   里（既没有原生对话框，也没有自绘框）。
-//!
-//!   要覆盖它们，得把绘制挂到 `prpr::scene::Main::render` 的顶层（那里对所有场景
-//!   都在栈顶之上绘制，引擎自带的 `DIALOG` 就是这么做的）。
+//! ⚠️ 模态拦截（触摸不穿透到底下场景）**在引擎层做**：`prpr::scene::Main::touch`
+//! 的触摸派发里判 `has_pending_input()`，命中就 `return false`（保留触摸、不派发）。
+//! 只写在 `MainScene::touch` 里是不够的 —— 栈顶不是 `MainScene` 时那行根本不会执行，
+//! 表现就是「在练习模式 / 举报框里点确定，底下的场景也被点了一下」。
 //!
 //! # 交互
 //!
@@ -78,16 +74,35 @@ fn set_keyboard(show: bool) {
 /// 把软键盘事件并进输入缓冲。返回 `true` 表示要求「确定」（软键盘按了完成 / 回车）。
 ///
 /// 抽成纯函数是为了**能单测** —— 之前它内联在渲染函数里，嵌错一层都没人发现。
-fn apply_ime_events(text: &mut String, events: Vec<crate::ime::ImeEvent>) -> bool {
+/// 把软键盘事件并进文本。返回 `true` 表示「完成」（= 确定）。
+///
+/// `multiline` 决定软键盘的「完成 / 换行」键怎么处理：单行 = 确定，多行 = 换行
+/// （与物理回车键一致，否则多行输入框永远拿不到换行）。
+fn apply_ime_events(text: &mut String, events: Vec<crate::ime::ImeEvent>, multiline: bool) -> bool {
     let mut confirm = false;
     for ev in events {
         match ev {
-            crate::ime::ImeEvent::Char('\r') | crate::ime::ImeEvent::Char('\n') => confirm = true,
+            crate::ime::ImeEvent::Char('\r') | crate::ime::ImeEvent::Char('\n') => {
+                if multiline {
+                    text.push('\n');
+                } else {
+                    confirm = true;
+                }
+            }
             crate::ime::ImeEvent::Char(c) if !c.is_control() => text.push(c),
+            // 其余控制字符（含其它不可见字符）：不写进文本、也不确认，吞掉。
+            // ⚠️ 必须有这一臂：带 guard 的 `Char(c) if !c.is_control()` 不计入穷尽性，
+            // 没有它编译器会报 `ImeEvent::Char(..)` 未覆盖（控制字符那部分）。
+            crate::ime::ImeEvent::Char(_) => {}
             crate::ime::ImeEvent::Backspace => {
                 text.pop();
             }
-            _ => {}
+            // 软键盘「完成 / 确定」（Android 的 `performEditorAction`、统一走安全通道）。
+            // 语义 = 确定，与面板「确定」按钮等价；无论单行 / 多行都直接确认
+            // （多行的换行走软键盘自身的回车键或面板按钮，不靠这个动作键）。
+            crate::ime::ImeEvent::Confirm => {
+                confirm = true;
+            }
         }
     }
     confirm
@@ -97,7 +112,14 @@ fn apply_ime_events(text: &mut String, events: Vec<crate::ime::ImeEvent>) -> boo
 pub fn render(ui: &mut Ui, t: f32) {
     let Some(pending) = pending_input() else {
         // 请求在别处（或上一次交互里）已经结束：顺手清掉编辑缓冲。
+        // 如果刚才键盘还是弹起的（EDIT 还是 Some），这里一并把它收起 —— 否则外部
+        // 取消 / 消费掉请求时，键盘会卡在屏幕上（「输入框关了、软键盘还顶在那儿」）。
+        // 用 was_open 做门控，避免每帧（绝大多数帧都没有待处理请求）都去调一次收键盘。
+        let was_open = EDIT.with(|it| it.borrow().is_some());
         EDIT.with(|it| *it.borrow_mut() = None);
+        if was_open {
+            set_keyboard(false);
+        }
         // 顺便丢掉残留的软键盘事件 —— 否则输入框关掉期间按的键会漏进**下一次**输入。
         let _ = crate::ime::drain();
         return;
@@ -110,6 +132,11 @@ pub fn render(ui: &mut Ui, t: f32) {
         // 它只清 keys_pressed / mouse_pressed）。所以打开输入框之前敲的字符会一直
         // 躺在队列里，这里不排掉的话，输入框一打开就会被灌进一堆旧字符。
         while get_char_pressed().is_some() {}
+        // 软键盘事件同理：`ime` 的缓冲区也是「攒着等人取」，输入框关着的时候
+        // Android 的 deleteSurroundingText / iOS 的回调照样会往里塞。不排掉就会
+        // 漏进**下一次**输入（凭空少几个字）。注意 render 在无请求时根本不会被调用，
+        // 所以「无请求时清理」那条路指望不上，必须在**开新框**时清。
+        let _ = crate::ime::drain();
         set_keyboard(true);
         // 把初始文本也给 iOS 的隐藏输入框一份（顺序无所谓：两者都是
         // `dispatch_async` 到主队列，FIFO 执行）。不做这一步的话，隐藏框是空的，
@@ -127,8 +154,11 @@ pub fn render(ui: &mut Ui, t: f32) {
     let mut action: Option<bool> = None;
     if is_key_pressed(KeyCode::Escape) {
         action = Some(false);
-    } else if is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter) {
-        // 多行模式下也允许回车确定（简单优先：回车一律 = 确定）。
+    } else if (is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter)) && !pending.multiline {
+        // 单行：回车 = 确定。
+        // 多行：回车**换行**（确定走面板上的「确定」按钮，或软键盘的「完成」）——
+        // 否则 `InputMode::Multiline` 的调用点（举报理由 / 收藏描述 / 谱面信息）
+        // 永远拿不到换行，多行模式形同虚设。
         action = Some(true);
     } else {
         if (is_key_down(KeyCode::LeftControl) || is_key_down(KeyCode::RightControl)) && is_key_pressed(KeyCode::V) {
@@ -139,6 +169,9 @@ pub fn render(ui: &mut Ui, t: f32) {
         if is_key_pressed(KeyCode::Backspace) {
             // `String::pop` 按 `char` 删，不会把多字节字符切坏。
             edit.text.pop();
+        }
+        if pending.multiline && (is_key_pressed(KeyCode::Enter) || is_key_pressed(KeyCode::KpEnter)) {
+            edit.text.push('\n');
         }
         while let Some(ch) = get_char_pressed() {
             if !ch.is_control() {
@@ -155,9 +188,9 @@ pub fn render(ui: &mut Ui, t: f32) {
         if !ime_events.is_empty() {
             // 记进 crash-log（设置→日志 / Xcode 下载容器都能看）：
             // 有这行 = ObjC 那条回传通了，问题在别处；没有 = 委托没被调到。
-            crate::webui::diag(&format!("软键盘回传 {} 个事件", ime_events.len()));
+            crate::diag(&format!("软键盘回传 {} 个事件", ime_events.len()));
         }
-        if apply_ime_events(&mut edit.text, ime_events) {
+        if apply_ime_events(&mut edit.text, ime_events, pending.multiline) {
             action = Some(true); // 软键盘的「完成」= 确定
         }
     }
@@ -291,8 +324,10 @@ pub fn render(ui: &mut Ui, t: f32) {
     // 快捷按钮：退格（左尖括号）/ 清空
     let hp_back = if hovered(back_r) { 1. } else { 0. };
     let hp_clear = if hovered(clear_r) { 1. } else { 0. };
-    newui::draw_sec_btn(ui, &m, &th, back_r, hp_back, "退格", newui::Icon::ChevronLeft);
-    newui::draw_sec_btn(ui, &m, &th, clear_r, hp_clear, "清空", newui::Icon::X);
+    // 文案走 `common.ftl`（本模块不单独建 ftl：`ttl!` 是 crate 根为 `common.ftl`
+    // 声明的宏，`ttl!` 的 key 在 `common.ftl` 里）。
+    newui::draw_sec_btn(ui, &m, &th, back_r, hp_back, &ttl!("backspace"), newui::Icon::ChevronLeft);
+    newui::draw_sec_btn(ui, &m, &th, clear_r, hp_clear, &ttl!("clear"), newui::Icon::X);
 
     if action.is_none() {
         if clicked(ok_r) {
@@ -333,17 +368,17 @@ mod ime_apply_tests {
     #[test]
     fn chars_append_and_backspace_pops() {
         let mut s = String::from("RE");
-        assert!(!apply_ime_events(&mut s, vec![ImeEvent::Char('C'), ImeEvent::Char('A')]));
+        assert!(!apply_ime_events(&mut s, vec![ImeEvent::Char('C'), ImeEvent::Char('A')], false));
         assert_eq!(s, "RECA");
-        assert!(!apply_ime_events(&mut s, vec![ImeEvent::Backspace]));
+        assert!(!apply_ime_events(&mut s, vec![ImeEvent::Backspace], false));
         assert_eq!(s, "REC");
     }
 
     #[test]
     fn return_requests_confirm() {
         let mut s = String::new();
-        assert!(apply_ime_events(&mut s, vec![ImeEvent::Char('\r')]));
-        assert!(apply_ime_events(&mut s, vec![ImeEvent::Char('\n')]));
+        assert!(apply_ime_events(&mut s, vec![ImeEvent::Char('\r')], false));
+        assert!(apply_ime_events(&mut s, vec![ImeEvent::Char('\n')], false));
         // 回车本身不写进文本
         assert!(s.is_empty());
     }
@@ -351,14 +386,33 @@ mod ime_apply_tests {
     #[test]
     fn control_chars_are_ignored() {
         let mut s = String::new();
-        assert!(!apply_ime_events(&mut s, vec![ImeEvent::Char('\u{7}'), ImeEvent::Char('A')]));
+        assert!(!apply_ime_events(&mut s, vec![ImeEvent::Char('\u{7}'), ImeEvent::Char('A')], false));
         assert_eq!(s, "A");
     }
 
     #[test]
     fn backspace_on_empty_is_safe() {
         let mut s = String::new();
-        assert!(!apply_ime_events(&mut s, vec![ImeEvent::Backspace]));
+        assert!(!apply_ime_events(&mut s, vec![ImeEvent::Backspace], false));
         assert!(s.is_empty());
+    }
+
+    #[test]
+    fn confirm_event_requests_confirm_and_appends_nothing() {
+        // 软键盘「完成」= 确定，且不像回车那样往文本里塞换行。
+        let mut s = String::from("hi");
+        assert!(apply_ime_events(&mut s, vec![ImeEvent::Confirm], false));
+        assert_eq!(s, "hi");
+    }
+
+    #[test]
+    fn confirm_event_is_distinct_from_return() {
+        // Confirm 与 Char('\r') 应产生相同的最终结果（都确认），但走的是
+        // 不同事件，确认两者都被正确处理、不会漏。
+        let mut a = String::new();
+        let mut b = String::new();
+        assert!(apply_ime_events(&mut a, vec![ImeEvent::Confirm], false));
+        assert!(apply_ime_events(&mut b, vec![ImeEvent::Char('\r')], false));
+        assert_eq!(a, b);
     }
 }

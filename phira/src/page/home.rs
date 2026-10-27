@@ -1,8 +1,8 @@
 prpr_l10n::tl_file!("home");
 
 use super::{
-    load_font_with_cksum, set_bold_font, EventPage, HistoryPage, LibraryPage, MessagePage, NextPage, Page, ResPackPage, SFader,
-    SettingsPage, SharedState, BOLD_FONT_CKSUM,
+    load_font_with_cksum, set_bold_font, ChartToolboxPage, EventPage, HistoryPage, LibraryPage, MessagePage, NextPage, Page,
+    ResPackPage, SFader, SharedState, BOLD_FONT_CKSUM,
 };
 use crate::{
     anim::Anim,
@@ -57,6 +57,8 @@ enum PanelBtn {
     Play,
     /// 「资源包」
     ResPack,
+    /// 「谱面工具箱」（整宽一行）
+    Toolbox,
     /// 「设置」（与「活动」并排）
     Settings,
     /// 「活动」（与「设置」并排）
@@ -73,12 +75,13 @@ enum PanelBtn {
 
 impl PanelBtn {
     /// 自上而下的排列顺序，也是 `panel_btn` / `panel_rect` 的下标含义。
-    const ALL: [PanelBtn; 8] = [
+    const ALL: [PanelBtn; 9] = [
         PanelBtn::Play,
+        PanelBtn::LastPlay,
         PanelBtn::ResPack,
+        PanelBtn::Toolbox,
         PanelBtn::Settings,
         PanelBtn::Event,
-        PanelBtn::LastPlay,
         PanelBtn::Messages,
         PanelBtn::About,
         PanelBtn::Quit,
@@ -88,15 +91,15 @@ impl PanelBtn {
 pub struct HomePage {
     icons: Arc<Icons>,
 
-    /// 右侧玻璃面板的 8 个入口（下标含义见 [`PanelBtn::ALL`]）。
-    /// 顺序：开始游玩 / 资源包 / 设置 / 活动 / 上次游玩 / 消息 / 关于 / 退出。
-    panel_btn: [RectButton; 8],
+    /// 右侧玻璃面板的 9 个入口（下标含义见 [`PanelBtn::ALL`]）。
+    /// 顺序：开始游玩 / 资源包 / 谱面工具箱 / 设置 / 活动 / 上次游玩 / 消息 / 关于 / 退出。
+    panel_btn: [RectButton; 9],
     /// 每个入口的命中矩形（渲染时算出来，鼠标悬停判定用）。
-    panel_rect: [Rect; 8],
+    panel_rect: [Rect; 9],
     /// 鼠标悬停的入口下标（`usize::MAX` = 没有悬停）。
     panel_hover: usize,
     /// 悬停平滑过渡（悬停不再瞬切，0.16s 缓动）。
-    panel_hover_p: [Anim<f32>; 8],
+    panel_hover_p: [Anim<f32>; 9],
     /// 按压回弹：点击后按钮向右冲一下再回落。
     panel_press_i: usize,
     panel_press_p: Anim<f32>,
@@ -128,6 +131,9 @@ pub struct HomePage {
     /// 「照搬 kaichang/index.html」的首页立绘贴图 = `assets/3.png`（编译期嵌入）。
     /// 用户名下没有角色立绘时优先用它，观感与 kaichang 原页面一致。
     hero_tex: Option<SafeTexture>,
+    /// 开始页 Logo = `phirc.png`（Phirc Mod++ 字标，编译期嵌入）。
+    /// 用户指定用它替换原来手绘的「Phirc Mod ++」字标。
+    logo_tex: Option<SafeTexture>,
     /// 「上次游玩」卡片上的曲名 / 难度 / 最高分
     last_play_name: Option<String>,
     last_play_diff: Option<String>,
@@ -148,7 +154,6 @@ pub struct HomePage {
     char_illu_task: Option<Task<Result<DynamicImage>>>,
     // progress of character screen
     char_screen_p: Anim<f32>,
-    char_text_start: f32,
     char_cached_size: f32,
     char_scroll: Scroll,
     char_edit_btn: RectButton,
@@ -193,7 +198,7 @@ impl HomePage {
             icons: Arc::clone(&icons),
 
             panel_btn: std::array::from_fn(|_| RectButton::new()),
-            panel_rect: [Rect::new(0., 0., 0., 0.); 8],
+            panel_rect: [Rect::new(0., 0., 0., 0.); 9],
             panel_hover: usize::MAX,
             panel_hover_p: std::array::from_fn(|_| Anim::new(0.)),
             panel_press_i: 0,
@@ -217,8 +222,13 @@ impl HomePage {
             board_last: None,
             board_tex: None,
             // 照搬 kaichang/index.html 的左立绘：assets/3.png（编译期嵌入，不依赖网络/账号）
-            // 路径基准是本文件（phira/src/page/），所以指向 phira/ui/assets/3.png。
-            hero_tex: image::load_from_memory(include_bytes!("../../ui/assets/3.png"))
+            // 路径基准是本文件（phira/src/page/），所以指向 phira/art/assets/3.png。
+            // （原目录名是 `phira/ui/`，WebView 界面移除后改名为 `phira/art/`，
+            //   因为这里剩下的唯一素材就是首页左立绘，跟 WebView 无关了。）
+            hero_tex: image::load_from_memory(include_bytes!("../../art/assets/3.png"))
+                .ok()
+                .map(|it| it.into()),
+            logo_tex: image::load_from_memory(include_bytes!("../../art/assets/phirc.png"))
                 .ok()
                 .map(|it| it.into()),
             last_play_name: None,
@@ -271,7 +281,6 @@ impl HomePage {
             char_illu: None,
             char_illu_task: None,
             char_screen_p: Anim::new(0.),
-            char_text_start: 0.,
             char_cached_size: 0.,
             char_scroll: Scroll::new().use_clip(ClipType::Clip),
             char_edit_btn: RectButton::new(),
@@ -370,34 +379,9 @@ impl HomePage {
         let th = newui::theme();
         let c = m.content(ui);
 
-        // 视差输入：**优先姿态传感器（陀螺仪 / 重力）**，桌面端没有传感器就回退到鼠标指针。
-        // 设计稿原本是跟 `pointermove` 走的，按用户要求改成跟设备姿态走。
-        // 注：原来暴露在「设置 → 通用 → 陀螺仪跟随 / 陀螺仪幅度」的两项已按用户要求移除，
-        // 这里直接读 `Config` 里的持久值（默认开启、幅度 1.0）。
-        // 另注：这一层只有原生首页才用得到；开始界面实际由 WebView（`ui/index.html`）
-        // 承载，那张 HTML 是固定视角、没有视差。
-        let (nx, ny) = {
-            let config = &get_data().config;
-            if !config.gyro_parallax {
-                (0., 0.)
-            } else {
-                let scale = config.gyro_scale_clamped();
-                let raw = match prpr::scene::motion_tilt() {
-                    Some(v) => v,
-                    None => {
-                        // 鼠标在窗口外（或压根没有鼠标）时给中位，别让指针停在屏幕角落
-                        // 把整块版面顶到最大倾角
-                        let (mx, my) = newui::mouse_world();
-                        if (-1. ..=1.).contains(&mx) && (-ui.top..=ui.top).contains(&my) {
-                            (mx.clamp(-1., 1.), (my / ui.top).clamp(-1., 1.))
-                        } else {
-                            (0., 0.)
-                        }
-                    }
-                };
-                (raw.0 * scale, raw.1 * scale)
-            }
-        };
+        // 按用户要求：**删掉开始界面的「跟随鼠标 / 陀螺仪视差」**，nx/ny 恒为 0。
+        // （保留变量只为不动 `render_art` / `render_panel` 的签名与调用点。）
+        let (nx, ny) = (0f32, 0f32);
 
         // ---------- 版式：左立绘 / 右面板 ----------
         // kaichang：`.left-character{left:-3%;bottom:0;height:100vh}` + `img{height:100vh;width:auto}`。
@@ -471,7 +455,6 @@ impl HomePage {
         // 尺寸取 kaichang 的设计稿 px（主按钮 100 / 次级 76 / 并排 76 / 间距 16）。
         let cs = if m.compact { 0.86 } else { 1. };
         let h_main = 100. * cs;
-        let h_sec = 76. * cs;
         let h_row = 76. * cs;
         let h_last = 86. * cs;
         let h_quit = 46. * cs;
@@ -481,7 +464,8 @@ impl HomePage {
         let brand_gap = 22.;
         let margin = 16.;
 
-        let need = h_main + h_sec + h_row * 2. + h_last + h_quit + gap * 5.;
+        // 分区：主按钮 / 上次游玩 / 次级入口（3 行 × 2 列）/ 退出
+        let need = h_main + h_last + h_row * 3. + h_quit + gap * 5.;
         // 窗口矮的时候整列等比收缩（0.62 是下限，再矮就只能贴边了）
         let avail = area.h / m.u(1.);
         let s = ((avail - brand_h - brand_gap - margin * 2.) / need).clamp(0.62, 1.);
@@ -492,6 +476,27 @@ impl HomePage {
         let x = area.x;
         let w = area.w;
         let hpx = |v: f32| m.u(v * s);
+
+        // ---------- 卡片底板（用户要求：「保留左立绘，面板做成卡片」） ----------
+        //
+        // 品牌字标 + 8 个入口整体放进**一张**磨砂玻璃卡里，和设置页 / 曲库 / 消息页
+        // 那些卡片同款（都走 `newui::glass_card`）。里面每个按钮仍是自己的小玻璃块，
+        // 形成「卡中卡」的层次 —— 外层给的是「这是一个面板」的整体感，
+        // 内层给的是「这一项可以点」的可操作感。
+        //
+        // 内边距刻意留得比按钮间距大（18/16 vs 16），否则卡片边界和按钮边界会糊在一起。
+        {
+            let pad_x = m.u(18.);
+            let pad_y = m.u(16.);
+            let card = Rect::new(x - pad_x, y0 - pad_y, w + pad_x * 2., total + pad_y * 2.);
+            let p = newui::enter_p(enter, 0.02);
+            ui.scope(|ui| {
+                ui.dy((1. - p) * m.u(14.));
+                ui.alpha(p, |ui| {
+                    newui::glass_card(ui, card, m.u(22.), th, 0.);
+                });
+            });
+        }
 
         // ---------- 品牌字标（对应 kaichang 右上角的 `.logo`） ----------
         {
@@ -514,13 +519,19 @@ impl HomePage {
                     );
                     newui::text(ui, m, "SYSTEM READY", x + dot + m.u(8.), y0 + m.u(8.), 11., th.text_mute, (0., 0.5));
 
-                    // 字标右对齐到面板右边（与 kaichang 的 logo 同位）
-                    let size = 27.;
-                    let (t1, t2) = ("Phirc Mod", "++");
-                    let tw = tracked_width(ui, m, t1, size, 0.4, true) + tracked_width(ui, m, t2, size, 0.4, true);
-                    let ty = y0 + m.u(22.);
-                    let r0 = text_tracked(ui, m, t1, area.right() - tw, ty, size, th.text_hi, 0.4, (0., 0.), true);
-                    text_tracked(ui, m, t2, r0.right(), ty, size, th.orange, 0.4, (0., 0.), true);
+                    // Logo = `phirc.png`（用户指定）：右对齐到面板右边、等比缩放。
+                    // ⚠️ 图是**白字 + 淡蓝辉光**（为深底设计）→ 必须垫一块深色圆角底，
+                    // 否则浅色主题下白字压白卡看不见。（之前用主题墨色 tint 会把整个 logo
+                    // 染成纯黑，用户否掉。）
+                    if let Some(tex) = self.logo_tex.as_ref() {
+                        let lh = m.u(40.);
+                        let lw = lh * (tex.width() / tex.height().max(1.));
+                        let lr = Rect::new(area.right() - lw, y0 + m.u(6.), lw, lh);
+                        // 图是白字 + 淡蓝辉光（为深底设计）。**不垫深色底**（用户否掉「黑底」）：
+                        // 深色主题直接用白；浅色主题染成强调色（白字压白卡看不见，纯黑又被否掉）。
+                        let tint = if th.dark { WHITE } else { th.accent };
+                        ui.fill_rect(lr, (**tex, lr, ScaleType::Fit, tint));
+                    }
 
                     // 品牌下的一条细分割线
                     ui.fill_rect(
@@ -531,27 +542,36 @@ impl HomePage {
             });
         }
 
-        // ---------- 8 个入口的矩形（顺序必须与 `PanelBtn::ALL` 一致） ----------
+        // ---------- 9 个入口的矩形（顺序必须与 `PanelBtn::ALL` 一致） ----------
+        // 分区：主按钮 / 上次游玩 / 次级入口（3 行 × 2 列）/ 退出
         let mut y = y0 + m.u(brand_h + brand_gap);
         let r_main = Rect::new(x, y, w, hpx(h_main));
         y = r_main.bottom() + gy;
-        let r_sec = Rect::new(x, y, w, hpx(h_sec));
-        y = r_sec.bottom() + gy;
-        let r_row1 = Rect::new(x, y, w, hpx(h_row));
-        y = r_row1.bottom() + gy;
         let r_last = Rect::new(x, y, w, hpx(h_last));
         y = r_last.bottom() + gy;
-        let r_row2 = Rect::new(x, y, w, hpx(h_row));
-        y = r_row2.bottom() + gy;
+
+        // 次级入口：3 行 × 2 列（资源包|工具箱 / 设置|活动 / 消息|关于）
+        let half = (w - row_gy) * 0.5;
+        let grid_row = |yy: f32| Rect::new(x, yy, w, hpx(h_row));
+        let r_gr1 = grid_row(y);
+        y = r_gr1.bottom() + gy;
+        let r_gr2 = grid_row(y);
+        y = r_gr2.bottom() + gy;
+        let r_gr3 = grid_row(y);
+        y = r_gr3.bottom() + gy;
+
+        let left = |r: Rect| Rect::new(r.x, r.y, half, r.h);
+        let right = |r: Rect| Rect::new(r.x + half + row_gy, r.y, half, r.h);
+        let r_respack = left(r_gr1);
+        let r_toolbox = right(r_gr1);
+        let r_settings = left(r_gr2);
+        let r_event = right(r_gr2);
+        let r_messages = left(r_gr3);
+        let r_about = right(r_gr3);
+
         let r_quit = Rect::new(x, y, w, hpx(h_quit));
 
-        let half = (w - row_gy) * 0.5;
-        let r_settings = Rect::new(r_row1.x, r_row1.y, half, r_row1.h);
-        let r_event = Rect::new(r_row1.x + half + row_gy, r_row1.y, half, r_row1.h);
-        let r_messages = Rect::new(r_row2.x, r_row2.y, half, r_row2.h);
-        let r_about = Rect::new(r_row2.x + half + row_gy, r_row2.y, half, r_row2.h);
-
-        let rects = [r_main, r_sec, r_settings, r_event, r_last, r_messages, r_about, r_quit];
+        let rects = [r_main, r_last, r_respack, r_toolbox, r_settings, r_event, r_messages, r_about, r_quit];
         for (i, r) in rects.iter().enumerate() {
             self.panel_rect[i] = *r;
             self.panel_btn[i].set(ui, *r);
@@ -569,9 +589,9 @@ impl HomePage {
             }
             self.panel_hover = hover;
         }
-        let mut hp = [0f32; 8];
+        let mut hp = [0f32; 9];
         for (i, h) in hp.iter_mut().enumerate() {
-            *h = hover_step(&mut self.panel_hover_p[i], self.panel_hover == i, t);
+            *h = newui::hover_step(&mut self.panel_hover_p[i], self.panel_hover == i, t);
         }
         // 按压回弹：0.28s 从 1 回 0，按钮向右冲 5px（沿用原来左侧菜单的动效）
         let press_i = self.panel_press_i;
@@ -579,7 +599,7 @@ impl HomePage {
 
         // ---------- 绘制 ----------
         // 设计稿 `.enter`：各块依次淡入 + 上移
-        const DELAY: [f32; 8] = [0.14, 0.20, 0.26, 0.26, 0.32, 0.38, 0.38, 0.44];
+        const DELAY: [f32; 9] = [0.14, 0.20, 0.26, 0.26, 0.30, 0.30, 0.36, 0.36, 0.44];
         for i in 0..PanelBtn::ALL.len() {
             let r = rects[i];
             let p = newui::enter_p(enter, DELAY[i]);
@@ -597,14 +617,15 @@ impl HomePage {
                 ui.dy((1. - p) * m.u(18.) + ny * m.u(if i == 0 { 6. } else { 4. }));
                 ui.alpha(p, |ui| {
                     match PanelBtn::ALL[i] {
-                        PanelBtn::Play => draw_main_btn(ui, m, th, r, hp[i]),
-                        PanelBtn::ResPack => draw_sec_btn(ui, m, th, r, hp[i], &tl!("respack"), Icon::Download),
-                        PanelBtn::Settings => draw_row_btn(ui, m, th, r, hp[i], &tl!("menu-settings"), Icon::Gear, false, t),
-                        PanelBtn::Event => draw_row_btn(ui, m, th, r, hp[i], &tl!("event"), Icon::Trophy, false, t),
+                        PanelBtn::Play => newui::draw_main_btn_lg(ui, m, th, r, hp[i], &tl!("menu-start"), "GAME"),
+                        PanelBtn::ResPack => newui::draw_sec_btn_lg(ui, m, th, r, hp[i], &tl!("respack"), Icon::Download),
+                        PanelBtn::Toolbox => newui::draw_row_btn_lg(ui, m, th, r, hp[i], &ttl!("chart-toolbox"), Icon::Gear, false, t),
+                        PanelBtn::Settings => newui::draw_row_btn_lg(ui, m, th, r, hp[i], &tl!("menu-settings"), Icon::Gear, false, t),
+                        PanelBtn::Event => newui::draw_row_btn_lg(ui, m, th, r, hp[i], &tl!("event"), Icon::Trophy, false, t),
                         PanelBtn::LastPlay => self.draw_last_play(ui, m, th, r, hp[i]),
-                        PanelBtn::Messages => draw_row_btn(ui, m, th, r, hp[i], &tl!("menu-messages"), Icon::Chat, self.has_new, t),
-                        PanelBtn::About => draw_row_btn(ui, m, th, r, hp[i], &tl!("menu-about"), Icon::Info, false, t),
-                        PanelBtn::Quit => draw_quit_btn(ui, m, th, r, hp[i], &tl!("menu-quit")),
+                        PanelBtn::Messages => newui::draw_row_btn_lg(ui, m, th, r, hp[i], &tl!("menu-messages"), Icon::Chat, self.has_new, t),
+                        PanelBtn::About => newui::draw_row_btn_lg(ui, m, th, r, hp[i], &tl!("menu-about"), Icon::Info, false, t),
+                        PanelBtn::Quit => newui::draw_quit_btn_lg(ui, m, th, r, hp[i], &tl!("menu-quit")),
                     }
                 });
             });
@@ -720,13 +741,13 @@ impl HomePage {
                 newui::text(ui, m, "Phira", badge.x + m.u(16.), badge.center().y - m.u(8.), 15., th.text_hi, (0., 0.5));
                 newui::text(ui, m, "RHYTHM DIVISION", badge.x + m.u(16.), badge.center().y + m.u(9.), 9.5, th.text_mute, (0., 0.5));
 
-                let hint = "点击左侧立绘查看角色详情";
+                let hint = tl!("hint-character-detail");
                 let hx = badge.right() + m.u(18.);
                 let hy = badge.center().y;
                 if over_art {
                     // 压在立绘 / 图片上：强制纯白 + 黑投影
-                    newui::text(ui, m, hint, hx + m.u(1.), hy + m.u(1.), 13., th.black(0.45), (0., 0.5));
-                    newui::text(ui, m, hint, hx, hy, 13., th.white(0.72), (0., 0.5));
+                    newui::text(ui, m, hint.clone(), hx + m.u(1.), hy + m.u(1.), 13., th.black(0.45), (0., 0.5));
+                    newui::text(ui, m, hint.clone(), hx, hy, 13., th.white(0.72), (0., 0.5));
                 } else {
                     newui::text(ui, m, hint, hx, hy, 13., if th.dark { th.white(0.50) } else { th.text_mute }, (0., 0.5));
                 }
@@ -734,365 +755,82 @@ impl HomePage {
         });
     }
 
-    /// 「上次游玩的谱面」白卡（kaichang `.glass-btn.white`：**白底深字**）。
+    /// 「上次游玩」卡。
     ///
-    /// 深浅主题下它都是白卡片，所以卡片里的字**写死深色** —— 这是「浅底不能白字」
-    /// 规则的例外：底是白的，字只能深。
+    /// ⚠️ 2026-10-09 改版：原来它是一张**写死的白卡 + 深色字**（给「深色页面底 +
+    /// 玻璃面板」那套服务的）。改成 iOS 平面风格后，右侧面板本身就是白卡，
+    /// 再来一张白卡就完全糊在一起了；而且深色主题下一张纯白卡也很扎眼。
+    /// 现在改成跟主题走的实色卡：底色比面板**拉开一档明度差**，压在面板上才看得
+    /// 出是一张独立的卡（浅色 = 比白深一档的灰，深色 = 比 `#1C1C1E` 亮一档）。
     fn draw_last_play(&self, ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32) {
-        /// 白卡上的墨色（kaichang 用的 `#0b1116`）。
-        const INK: Color = newui::rgba(0x0b, 0x11, 0x16, 1.);
-        let r = hover_scale(r, hp);
+        let r = newui::hover_scale(r, hp);
         let radius = m.u(14.);
-        // 悬停白晕更亮（kaichang `hover: box-shadow: 0 8px 32px rgba(255,255,255,.35)`）
-        newui::glow_rect(ui, r, radius, th.white(0.08 + 0.14 * hp), m.u(10.), 6);
-        newui::rounded(ui, r, radius, Color::new(1., 1., 1., 0.94 + 0.06 * hp));
-        newui::rounded(ui, r.feather(-m.u(1.)), radius, Color::new(1., 1., 1., 0.18));
-        newui::rounded_stroke(ui, r, radius, m.u(1.), Color::new(1., 1., 1., 0.85));
+        newui::rounded(ui, r, radius, newui::mix(th.bg_elev, th.bg_hover, 0.55 + 0.35 * hp));
+        newui::rounded_stroke(ui, r, radius, m.u(1.), th.border);
 
         // 封面
         let cover_s = r.h - m.u(22.);
         let cover = Rect::new(r.x + m.u(11.), r.center().y - cover_s * 0.5, cover_s, cover_s);
         clip_rounded_rect(ui, cover, m.u(9.), |ui| {
-            newui::rounded(ui, cover, m.u(9.), newui::rgba(0x0b, 0x11, 0x16, 0.08));
+            newui::rounded(ui, cover, m.u(9.), th.wash(0.08));
             if let Some(tex) = &self.board_tex {
                 ui.fill_rect(cover, (**tex, cover, ScaleType::CropCenter, Color::new(1., 1., 1., 0.96)));
             }
         });
         if self.board_tex.is_none() {
-            newui::draw_icon(ui, m, Icon::Music, cover.feather(-cover_s * 0.28), newui::rgba(0x0b, 0x11, 0x16, 0.45), 1.7);
+            newui::draw_icon(ui, m, Icon::Music, cover.feather(-cover_s * 0.28), th.text_mute, 1.7);
         }
 
         let tx = cover.right() + m.u(13.);
         let max_w = (r.right() - m.u(64.) - tx).max(m.u(60.));
-        newui::text(ui, m, "LAST PLAYED", tx, r.y + m.u(13.), 10.5, newui::rgba(0x0b, 0x11, 0x16, 0.45), (0., 0.));
-        let name = self.last_play_name.clone().unwrap_or_else(|| "上次游玩的谱面".to_owned());
-        newui::text_ellipsis(ui, m, name, tx, r.y + m.u(28.), 18., max_w, INK, (0., 0.));
+        newui::text(ui, m, "LAST PLAYED", tx, r.y + m.u(13.), 10.5, th.text_mute, (0., 0.));
+        let name = self.last_play_name.clone().unwrap_or_else(|| tl!("last-played-none").into_owned());
+        newui::text_ellipsis(ui, m, name, tx, r.y + m.u(28.), 18., max_w, th.text_hi, (0., 0.));
 
-        // 底部一行：难度 chip + 分数（白底上 chip 用深底，白字才有对比）
+        // 底部一行：难度 chip + 分数
         let my = r.bottom() - m.u(15.);
         let mut mx = tx;
         if let Some(diff) = &self.last_play_diff {
             let cw = newui::measure(ui, m, diff.clone(), 11.5).w + m.u(15.);
             let chip = Rect::new(mx, my - m.u(8.), cw, m.u(16.));
             let kind = th.diff_kind(diff);
-            newui::rounded(ui, chip, m.u(3.), newui::rgba(0x0b, 0x11, 0x16, 0.82));
+            // 难度 chip 用**深底白字**：`text_diff` 不画投影，白字必须自带深底
+            newui::rounded(ui, chip, m.u(5.), th.with_a(th.black(1.), if th.dark { 0.30 } else { 0.58 }));
             newui::text_diff(ui, diff, chip.center().x, chip.center().y, m.f(11.), kind, (0.5, 0.5), chip.w - m.u(6.), 0.);
             mx = chip.right() + m.u(10.);
         }
         if let Some(score) = self.last_play_score {
-            newui::text(ui, m, fmt_score(score), mx, my, 12.5, newui::rgba(0x0b, 0x11, 0x16, 0.62), (0., 0.5));
+            newui::text(ui, m, fmt_score(score), mx, my, 12.5, th.text_dim, (0., 0.5));
         } else if self.board_tex.is_none() {
-            newui::text(ui, m, tl!("random-no-chart"), mx, my, 12., newui::rgba(0x0b, 0x11, 0x16, 0.45), (0., 0.5));
+            newui::text(ui, m, tl!("random-no-chart"), mx, my, 12., th.text_mute, (0., 0.5));
         }
 
-        // 右侧播放圆钮（白底上的深色圆环，悬停变大）
+        // 右侧播放圆钮（跟主题墨色走，悬停变大）
         let pr = m.u(38.) * (1. + 0.06 * hp);
         let pc = (r.right() - m.u(37.), r.center().y);
-        ui.fill_circle(pc.0, pc.1, pr * 0.5, newui::rgba(0x0b, 0x11, 0x16, 0.06 + 0.05 * hp));
-        ui.stroke_circle(pc.0, pc.1, pr * 0.5, m.u(1.), newui::rgba(0x0b, 0x11, 0x16, 0.22 + 0.20 * hp));
+        ui.fill_circle(pc.0, pc.1, pr * 0.5, th.wash(0.06 + 0.05 * hp));
+        ui.stroke_circle(pc.0, pc.1, pr * 0.5, m.u(1.), th.wash(0.22 + 0.20 * hp));
         newui::draw_icon(
             ui,
             m,
             Icon::Play,
             Rect::new(pc.0 - pr * 0.18, pc.1 - pr * 0.20, pr * 0.36, pr * 0.40),
-            INK,
+            th.text_hi,
             1.,
         );
     }
 }
 
 // ============================================================
-// 开始界面的版式件：玻璃按钮 / 带字距排版 / 立绘羽化
+// 开始界面的版式件
 // ============================================================
-
-/// 推进一个悬停进度条（0.16s 缓动，替代瞬切），返回当前值。
-fn hover_step(a: &mut Anim<f32>, on: bool, t: f32) -> f32 {
-    let target = if on { 1. } else { 0. };
-    if !a.transiting(t) && (target - a.now(t)).abs() > 1e-3 {
-        a.goto(target, t, 0.16);
-    }
-    a.now(t)
-}
-
-/// 玻璃按钮的描边色（kaichang `rgba(255,255,255,.18)` → 深色加白 / 浅色加黑）。
-fn glass_border(th: &Theme, hp: f32) -> Color {
-    if th.dark {
-        th.white(0.16 + 0.18 * hp)
-    } else {
-        th.black(0.09 + 0.08 * hp)
-    }
-}
-
-/// 玻璃面板上的文字色：深色主题纯白，浅色主题主题墨色（**绝不写死纯白**）。
-fn glass_text(th: &Theme, hp: f32) -> Color {
-    if th.dark {
-        newui::mix(th.white(0.92), th.white(1.), hp)
-    } else {
-        newui::mix(th.text, th.text_hi, hp)
-    }
-}
-
-/// kaichang `.glass-btn` 的底板：磨砂亚克力 + 玻璃亮面 + 顶部高光 + 描边。
-///
-/// `tint` 是叠在底板上的强调色（alpha 为 0 表示不叠）。
-#[allow(clippy::too_many_arguments)]
-fn glass_plate(ui: &mut Ui, m: &Metrics, r: Rect, radius: f32, th: &Theme, hp: f32, tint: Color, border: Color) {
-    let radius = radius.min(r.h * 0.5).min(r.w * 0.5);
-    // 磨砂亚克力（对应 `backdrop-filter: blur(14px)` 的对应物）
-    newui::acrylic(ui, r, radius, th);
-    // 玻璃亮面（kaichang `rgba(255,255,255,.08)` → hover `.14`）
-    newui::rounded(
-        ui,
-        r,
-        radius,
-        if th.dark {
-            th.white(0.05 + 0.06 * hp)
-        } else {
-            th.white(0.24 + 0.22 * hp)
-        },
-    );
-    if tint.a > 1e-3 {
-        newui::rounded(
-            ui,
-            r,
-            radius,
-            Color {
-                a: (tint.a * (0.8 + 0.45 * hp)).min(1.),
-                ..tint
-            },
-        );
-    }
-    // 顶部那一道玻璃反光
-    let hl = Rect::new(r.x + radius * 0.6, r.y + m.u(1.), (r.w - radius * 1.2).max(0.), m.u(1.));
-    ui.fill_rect(hl, if th.dark { th.white(0.10 + 0.06 * hp) } else { th.white(0.55) });
-    newui::rounded_stroke(ui, r, radius, m.u(1.), border);
-}
-
-/// 悬停时的**缩放动效**：光标进入时整块按钮轻微「弹」起（CSS `hover` 的 transform）。
-///
-/// 缩放锚点在矩形中心，所以左右按钮的间距观感不受影响。
-fn hover_scale(r: Rect, hp: f32) -> Rect {
-    let s = 1. + 0.014 * hp.clamp(0., 1.);
-    newui::scaled_rect(r, s, s)
-}
-
-/// kaichang `.main-arrow` 的箭头（SVG `M5 12h14M13 6l6 6-6 6`）。
-const ARROW_SEGS: &[newui::Seg] = &[
-    newui::Seg::M(5., 12.),
-    newui::Seg::L(19., 12.),
-    newui::Seg::M(13., 6.),
-    newui::Seg::L(19., 12.),
-    newui::Seg::L(13., 18.),
-];
-
-/// 画那根箭头（`stroke_px` 是 24×24 视口里的线宽）。
-fn draw_arrow(ui: &mut Ui, r: Rect, color: Color, stroke_px: f32) {
-    let s = (r.w / 24.).min(r.h / 24.);
-    ui.stroke_options.start_cap = lyon::path::LineCap::Round;
-    ui.stroke_options.end_cap = lyon::path::LineCap::Round;
-    ui.stroke_options.line_join = lyon::path::LineJoin::Round;
-    ui.stroke_path(&newui::build_icon_path(ARROW_SEGS, r), stroke_px * s, color);
-}
-
-/// 主按钮「开始游玩 / GAME / →」（kaichang `.glass-btn.main`）。
-fn draw_main_btn(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32) {
-    let r = hover_scale(r, hp);
-    let radius = m.u(14.);
-    // 强调色：深色主题 = kaichang 的青色；浅色主题 = Win11 强调蓝
-    // （青色压在浅灰上读不出来，浅色主题必须换成深一档的蓝）
-    let (tint, border, hi, cn_col, en_col) = if th.dark {
-        (
-            newui::rgba(120, 240, 255, 0.12),
-            newui::rgba(150, 240, 255, 1.),
-            newui::rgba(160, 245, 255, 1.),
-            th.white(1.),
-            newui::rgba(180, 240, 255, 0.78),
-        )
-    } else {
-        (
-            newui::rgba(0, 120, 212, 0.10),
-            newui::rgba(0, 103, 192, 1.),
-            newui::rgba(0, 120, 212, 1.),
-            th.accent,
-            th.with_a(th.teal, 0.85),
-        )
-    };
-    // 外发光（kaichang `box-shadow: 0 0 40px rgba(0,200,255,.15)`）
-    newui::glow_rect(ui, r, radius, Color { a: 0.14 + 0.14 * hp, ..hi }, m.u(11.), 7);
-    glass_plate(
-        ui,
-        m,
-        r,
-        radius,
-        th,
-        hp,
-        tint,
-        Color {
-            a: 0.55 + 0.40 * hp,
-            ..border
-        },
-    );
-    // 内部透光（`inset 0 0 40px`）
-    newui::rounded(ui, r.feather(-m.u(2.)), radius, Color { a: 0.05 + 0.06 * hp, ..hi });
-
-    let pad = m.u(44.);
-    let cn = text_tracked(ui, m, &tl!("menu-start"), r.x + pad, r.center().y, 31., cn_col, 4., (0., 0.5), true);
-    // 小号英文贴在中文右下角（kaichang `.main-en{align-self:flex-end}`）
-    text_tracked(ui, m, "GAME", cn.right() + m.u(14.), r.center().y + m.u(11.), 13., en_col, 2., (0., 1.), false);
-
-    // 箭头：悬停往右冲 6px（kaichang `.main-arrow:hover{transform:translateX(6px)}`）
-    let aw = m.u(28.);
-    let ar = Rect::new(r.right() - pad - aw, r.center().y - aw * 0.5, aw, aw);
-    ui.scope(|ui| {
-        ui.dx(hp * m.u(6.));
-        draw_arrow(ui, ar, Color { a: 0.85 + 0.15 * hp, ..hi }, 2.4);
-    });
-}
-
-/// 次级满宽按钮：左对齐标签 + 右侧弱化图标（kaichang `.glass-btn.sec`）。
-fn draw_sec_btn(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, label: &str, icon: Icon) {
-    let r = hover_scale(r, hp);
-    let radius = m.u(14.);
-    glass_plate(ui, m, r, radius, th, hp, Color::new(0., 0., 0., 0.), glass_border(th, hp));
-    text_tracked(ui, m, label, r.x + m.u(44.), r.center().y, 22., glass_text(th, hp), 4., (0., 0.5), true);
-    let isz = m.u(20.);
-    newui::draw_icon(
-        ui,
-        m,
-        icon,
-        Rect::new(r.right() - m.u(44.), r.center().y - isz * 0.5, isz, isz),
-        newui::mix(th.text_mute, th.accent_hi, hp),
-        1.7,
-    );
-}
-
-/// 并排按钮（设置 / 活动 / 消息 / 关于）：图标 + 标签整体居中。
-#[allow(clippy::too_many_arguments)]
-fn draw_row_btn(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, label: &str, icon: Icon, badge: bool, t: f32) {
-    let r = hover_scale(r, hp);
-    let radius = m.u(14.);
-    glass_plate(ui, m, r, radius, th, hp, Color::new(0., 0., 0., 0.), glass_border(th, hp));
-
-    let size = 21.;
-    let isz = m.u(19.);
-    let tw = tracked_width(ui, m, label, size, 3., true);
-    let x0 = r.center().x - (isz + m.u(10.) + tw) * 0.5;
-    newui::draw_icon(
-        ui,
-        m,
-        icon,
-        Rect::new(x0, r.center().y - isz * 0.5, isz, isz),
-        newui::mix(th.text_dim, th.accent_hi, hp),
-        1.8,
-    );
-    let lr = text_tracked(
-        ui,
-        m,
-        label,
-        x0 + isz + m.u(10.),
-        r.center().y,
-        size,
-        glass_text(th, hp),
-        3.,
-        (0., 0.5),
-        true,
-    );
-
-    if badge {
-        // 有新消息：标签右边的呼吸红点（设计稿 `dotPulse` 2.2s）
-        let dp = newui::pulse(t, 2.2, 0.);
-        ui.fill_circle(
-            lr.right() + m.u(9.),
-            r.center().y,
-            m.u(3.6) * (0.82 + 0.18 * (1. - dp)),
-            Color {
-                a: 0.55 + 0.45 * (1. - dp),
-                ..th.red
-            },
-        );
-    }
-}
-
-/// 面板最底部的「退出」：弱化样式（只有悬停才转红）。
-fn draw_quit_btn(ui: &mut Ui, m: &Metrics, th: &Theme, r: Rect, hp: f32, label: &str) {
-    let r = hover_scale(r, hp);
-    let radius = m.u(10.);
-    newui::rounded(
-        ui,
-        r,
-        radius,
-        if th.dark {
-            th.white(0.03 + 0.04 * hp)
-        } else {
-            th.black(0.025 + 0.03 * hp)
-        },
-    );
-    newui::rounded_stroke(
-        ui,
-        r,
-        radius,
-        m.u(1.),
-        newui::mix(th.wash(0.10), th.with_a(th.red, 0.55), hp),
-    );
-
-    let col = newui::mix(if th.dark { th.white(0.52) } else { th.text_mute }, th.red, hp);
-    let size = 16.;
-    let isz = m.u(16.);
-    let tw = tracked_width(ui, m, label, size, 3., false);
-    let x0 = r.center().x - (isz + m.u(9.) + tw) * 0.5;
-    newui::draw_icon(ui, m, Icon::Logout, Rect::new(x0, r.center().y - isz * 0.5, isz, isz), col, 1.8);
-    text_tracked(ui, m, label, x0 + isz + m.u(9.), r.center().y, size, col, 3., (0., 0.5), false);
-}
-
-/// 逐字符排版一段带字距的文字（CSS `letter-spacing` 的对应物），返回整段宽度。
-fn tracked_width(ui: &mut Ui, m: &Metrics, s: &str, size_px: f32, track_px: f32, bold: bool) -> f32 {
-    let track = m.u(track_px);
-    let mut w = 0.;
-    for ch in s.chars() {
-        let cw = if bold {
-            newui::measure_with_font(ui, m, ch.to_string(), size_px, &BOLD_FONT).w
-        } else {
-            newui::measure(ui, m, ch.to_string(), size_px).w
-        };
-        w += cw + track;
-    }
-    (w - track).max(0.)
-}
-
-/// 画一段带字距的文字（逐字符画，字距 `track_px` 是设计稿像素）。
-/// `anchor` 与 [`newui::text`] 同义，返回整段包围盒。
-#[allow(clippy::too_many_arguments)]
-fn text_tracked(
-    ui: &mut Ui,
-    m: &Metrics,
-    s: &str,
-    x: f32,
-    y: f32,
-    size_px: f32,
-    color: Color,
-    track_px: f32,
-    anchor: (f32, f32),
-    bold: bool,
-) -> Rect {
-    let total = tracked_width(ui, m, s, size_px, track_px, bold);
-    let track = m.u(track_px);
-    let start = x - total * anchor.0;
-    let mut cx = start;
-    let mut out = Rect::new(start, y, total, 0.);
-    for ch in s.chars() {
-        let r = if bold {
-            newui::text_with_font(ui, m, ch.to_string(), cx, y, size_px, color, (0., anchor.1), &BOLD_FONT)
-        } else {
-            newui::text(ui, m, ch.to_string(), cx, y, size_px, color, (0., anchor.1))
-        };
-        if out.h <= 1e-6 {
-            out.y = r.y;
-            out.h = r.h;
-        }
-        cx = r.right() + track;
-    }
-    out
-}
+//
+// 这里**不再自己实现**玻璃底板 / 带字距排版 / 按钮 —— 全部在 `crate::newui` 里，
+// 和设置页、曲库、消息页共用同一套（`glass_plate_flat` / `glass_border` /
+// `glass_text` / `hover_scale` / `text_tracked` / `draw_*_btn_lg`）。
+// 以前这里各留一份，导致「改了 newui 的玻璃质感、开始页却没变」。
+//
+// 本文件只剩「开始页独有」的东西：立绘羽化着色、上次游玩白卡、面板竖向排版。
 
 // ============================================================
 // 立绘羽化（右边缘渐隐）
@@ -1261,11 +999,18 @@ impl Page for HomePage {
                     match PanelBtn::ALL[i] {
                         PanelBtn::Play | PanelBtn::LastPlay => self.open_library(s)?,
                         PanelBtn::ResPack => {
-                            self.next_page = Some(NextPage::Overlay(Box::new(ResPackPage::new(Arc::clone(&self.icons))?)));
+                            // WebView 可用时打开资源包页（ResPack.html），否则回退原生 ResPackPage
+                            if crate::webui::host_available() {
+                                crate::webui::open_respack();
+                            } else {
+                                self.next_page = Some(NextPage::Overlay(Box::new(ResPackPage::new(Arc::clone(&self.icons))?)));
+                            }
+                        }
+                        PanelBtn::Toolbox => {
+                            self.next_page = Some(NextPage::Overlay(Box::new(ChartToolboxPage::new())));
                         }
                         PanelBtn::Settings => {
-                            newui::set_current_activity(Activity::Settings);
-                            self.next_page = Some(NextPage::Overlay(Box::new(SettingsPage::new(self.icons.icon.clone(), self.icons.lang.clone()))));
+                            crate::webui::open_settings();
                         }
                         PanelBtn::Event => {
                             if get_data().me.is_none() {
@@ -1301,25 +1046,16 @@ impl Page for HomePage {
             // 立绘区**双击** → 打开相册换立绘（系统文件选择器，id 与设置页一致）。
             // 单击仍是原行为：展开 / 收起角色详情。
             // （同一块矩形只用一个 RectButton 判定，避免两个按钮抢同一次点击。）
+            // 按用户要求：**去掉**「点立绘展开角色简介」——单击立绘不再展开/收起简介。
+            // （双击 → 打开相册换立绘的行为保留。）
             if let Some(last) = self.char_pick_last {
                 if rt - last < DOUBLE_CLICK_WINDOW {
-                    // 双击：只要相册选择器，**不**展开角色详情（直接 return，下面的
-                    // 面板展开逻辑不执行）
                     self.char_pick_last = None;
                     prpr::scene::request_file("home_char");
                     return Ok(true);
                 }
             }
             self.char_pick_last = Some(rt);
-            if !self.char_screen_p.transiting(rt) {
-                let to = if self.char_screen_p.now(rt) < 0.5 {
-                    self.char_text_start = rt;
-                    1.
-                } else {
-                    0.
-                };
-                self.char_screen_p.goto(to, rt, 0.5);
-            }
             return Ok(true);
         }
         Ok(false)
@@ -1338,7 +1074,7 @@ impl Page for HomePage {
                 self.next_page = Some(NextPage::Overlay(Box::new(HistoryPage::new())));
             }
             Some(Activity::Settings) => {
-                self.next_page = Some(NextPage::Overlay(Box::new(SettingsPage::new(self.icons.icon.clone(), self.icons.lang.clone()))));
+                crate::webui::open_settings();
             }
             Some(Activity::Account) => {
                 if let Some(me) = &get_data().me {
@@ -1549,7 +1285,7 @@ impl Page for HomePage {
                         self.load_char_illu();
                         prpr::scene::show_message(tl!("char-imported")).ok();
                     }
-                    Err(err) => show_error(err.context("立绘导入失败")),
+                    Err(err) => show_error(err.context(tl!("char-import-failed").into_owned())),
                 }
             } else {
                 prpr::scene::return_file(id, file);
@@ -1560,6 +1296,21 @@ impl Page for HomePage {
     }
 
     fn render(&mut self, ui: &mut Ui, s: &mut SharedState) -> Result<()> {
+        // ⚠️ 原生 Home 页**彻底删掉**：WebView 可用时这里一个字都不画。
+        //
+        // 用户要求「直接把老界面删了」—— 之前只是把「回到它」的出口全堵上
+        //（hide / open_page('home') / 返回回根都改回 WebView），但只要有任何一条
+        // 路径把它露出来（比如换全屏时 WebView 那一帧还没跟上窗口尺寸），
+        // 用户就会看到那个「开始游戏 / 资源包 / 谱面工具箱 / 设置 / 活动 / 消息 / 关于 / 退出」
+        // 的老面板。这里直接不画，它就再也露不出来了。
+        //
+        // 不画也不影响功能：它的按钮本来就被 WebView 盖住、点不到；`update` / `enter`
+        // 照旧跑（导入任务、登录态这些副作用都在那里，不在 render 里）。
+        // WebView 不可用（没有 WebView2）时照旧完整渲染，兜底不变。
+        if crate::webui::host_available() {
+            return Ok(());
+        }
+
         let t = s.t;
         let rt = s.rt;
 

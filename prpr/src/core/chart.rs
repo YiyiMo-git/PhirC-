@@ -1,5 +1,5 @@
 use super::{
-    draw_disabled_zones, draw_zones_with_touches, reset_block_effects, BlockArea, BpmList, Effect, JudgeLine, JudgeLineCache, JudgeLineKind, Matrix,
+    draw_disabled_zones, draw_zones_with_touches, reset_block_effects, BlockArea, BlockRenderer, BpmList, Effect, JudgeLine, JudgeLineCache, JudgeLineKind, Matrix,
     NoteKind, Resource, UIElement, Vector, Zone,
 };
 use crate::{config::NoteMap, core::Object, fs::FileSystem, judge::JudgeStatus, ui::Ui};
@@ -46,6 +46,20 @@ pub struct Chart {
 
     /// Phigros 第 9 章的触摸阻挡区（`blockAreaList`）。
     pub block_areas: Vec<BlockArea>,
+    /// RPEN 全局轨道与相机（`globalEvents`）。非 RPEN 谱面为 None。
+    pub rpen: Option<super::rpen_scene::Scene>,
+    /// RPEN 新格式 `blockAreaList`（带 `layerId` / `isInvert`）。
+    /// **和 `block_areas` 分开**：旧数据来自噪域线，新数据来自列表，两套互不干扰。
+    pub next_block_areas: Vec<super::rpe_next_block::Area>,
+    /// RPEN 新版反转规则：某层「恰好 1 个反转区」才翻转（旧版是「奇数个」）。
+    pub single_inversion: bool,
+    /// 每层独立的噪域渲染器（掩码 / 纹理缓存按层隔离）。
+    pub next_layer_renderers: Vec<BlockRenderer>,
+    /// 每层的自定义皮肤（`noiseAreaLayers[].skin`）。`None` = 用原生噪域材质。
+    pub next_layer_skins: Vec<Option<super::rpen_skin::Skin>>,
+    /// 单层（无 `noiseAreaLayers`）时共用的渲染器。
+    next_block_renderer: BlockRenderer,
+    next_block_frame: RefCell<(Option<(f64, f32, usize)>, Vec<super::rpe_next_block::Sample>)>,
     /// 本帧被阻挡区挡下的触摸（谱面坐标）。
     pub blocked_touches: Vec<(u64, Vector)>,
 }
@@ -77,6 +91,13 @@ impl Chart {
             hitsounds,
 
             block_areas: Vec::new(),
+            next_block_areas: Vec::new(),
+            single_inversion: false,
+            next_layer_renderers: Vec::new(),
+            next_layer_skins: Vec::new(),
+            next_block_renderer: BlockRenderer::default(),
+            next_block_frame: RefCell::default(),
+            rpen: None,
             blocked_touches: Vec::new(),
         }
     }
@@ -148,6 +169,14 @@ impl Chart {
     pub fn reset(&mut self) {
         self.blocked_touches.clear();
         reset_block_effects();
+        self.next_block_frame.get_mut().0 = None;
+        self.next_block_renderer.reset();
+        for renderer in &mut self.next_layer_renderers {
+            renderer.reset();
+        }
+        for skin in self.next_layer_skins.iter().flatten() {
+            skin.reset();
+        }
         self.lines
             .iter_mut()
             .flat_map(|it| it.notes.iter_mut())
@@ -185,6 +214,39 @@ impl Chart {
         }
     }
 
+    /// RPEN 相机矩阵：没有相机时是单位阵（对普通谱面完全无影响）。
+    pub fn camera_matrix(&self, time: f64, aspect: f32) -> Matrix {
+        self.rpen
+            .as_ref()
+            .and_then(|r| r.camera.as_ref())
+            .map_or_else(Matrix::identity, |c| c.matrix(time, aspect))
+    }
+
+    /// 是否用了投影相机（渲染层据此决定要不要 `clip_model`）。
+    pub fn projected_chart(&self) -> bool {
+        self.rpen.as_ref().is_some_and(|r| r.camera.is_some())
+    }
+
+    /// 把屏幕上的触点反投影回谱面坐标。
+    ///
+    /// 有相机时触点要经过 `screen_matrix` 的逆变换；超出可见深度（1..=150000）
+    /// 返回 `None`，调用方应把该触点当作「不在谱面内」忽略。
+    pub fn unproject_touch(&self, point: Vector, time: f64, aspect: f32) -> Option<Vector> {
+        let matrix = self
+            .rpen
+            .as_ref()
+            .and_then(|r| r.camera.as_ref())
+            .map_or_else(Matrix::identity, |c| c.screen_matrix(time, aspect));
+        let inverse = matrix.try_inverse()?;
+        let p = inverse * nalgebra::Vector3::new(point.x, point.y, 1.);
+        if !p.iter().all(|v| v.is_finite()) || p.z.abs() < 1e-6 {
+            return None;
+        }
+        let p = nalgebra::Vector3::new(p.x / p.z, p.y / p.z, 1.);
+        let depth = (matrix * p).z;
+        (depth >= 0.001 && depth <= 150.).then_some(Vector::new(p.x, p.y))
+    }
+
     pub fn render(&self, ui: &mut Ui, res: &mut Resource) {
         #[cfg(feature = "video")]
         for (video, attach) in &self.extra.videos {
@@ -203,12 +265,29 @@ impl Chart {
             // 官方排序层：Background 层放阻挡区（第 2 层），判定线第 3 层。
             let zones = self.block_zones(res);
             draw_disabled_zones(res, res.aspect_ratio, &zones);
+            // RPEN 新格式噪区的 Disabled 层同样在判定线之前。
+            let next = self.next_block_samples(res.time, res.aspect_ratio);
+            if !next.is_empty() {
+                self.draw_next_layers(res, &next, true);
+            }
+            drop(next);
+            // RPEN 相机：有的话用投影矩阵（clip_model 保留 W 通道做透视），
+            // 没有就是单位阵 —— 对普通谱面零影响。
+            let projection = self.camera_matrix(res.time, res.aspect_ratio);
+            let camera_glm = if self.projected_chart() {
+                crate::core::rpen_scene::clip_model(&projection)
+            } else {
+                crate::ext::nalgebra_to_glm(&projection)
+            };
+            let gl = unsafe { get_internal_gl() }.quad_gl;
+            gl.push_model_matrix(camera_glm);
             let mut guard = self.bpm_list.borrow_mut();
             for id in &self.order {
                 self.lines[*id].render(ui, res, &self.lines, &mut guard, &self.settings, *id);
             }
             drop(guard);
             res.note_buffer.borrow_mut().draw_all();
+            gl.pop_model_matrix();
             if res.config.sample_count > 1 {
                 unsafe { get_internal_gl() }.flush();
                 if let Some(target) = &res.chart_target {
@@ -236,7 +315,79 @@ impl Chart {
         let zones = self.block_zones(res);
         res.apply_model_of(&Matrix::identity().append_nonuniform_scaling(&Vector::new(if flip_x { -1. } else { 1. }, -1.)), |res| {
             draw_zones_with_touches(res, res.aspect_ratio, &zones, &self.blocked_touches, flip_x);
+            if !self.next_block_areas.is_empty() {
+                let next = self.next_block_samples(res.time, res.aspect_ratio);
+                self.draw_next_layers(res, &next, false);
+            }
         });
+    }
+
+    /// RPEN 是否用了自定义噪域皮肤（供加载阶段决定是否预编译）。
+    pub fn has_rpen_skins(&self) -> bool {
+        self.next_layer_skins.iter().any(Option::is_some)
+    }
+
+    fn draw_next_layers(&self, res: &mut Resource, next: &[super::rpe_next_block::Sample], disabled: bool) {
+        let flip_x = res.config.flip_x();
+        let flip = Matrix::identity().append_nonuniform_scaling(&Vector::new(if flip_x { -1. } else { 1. }, -1.));
+        let parent = crate::ext::nalgebra_to_glm(&flip);
+        // 有相机时被挡触点要先投影到屏幕空间，皮肤/噪域材质都按屏幕 UV 工作。
+        let matrix = self.camera_matrix(res.time, res.aspect_ratio);
+        let touches: Vec<_> = self
+            .blocked_touches
+            .iter()
+            .filter_map(|&(id, p)| {
+                let p = matrix * nalgebra::Vector3::new(p.x, p.y, 1.);
+                (p.z >= 0.001 && p.z <= 150.).then_some((id, Vector::new(p.x / p.z, p.y / p.z)))
+            })
+            .collect();
+        if self.next_layer_renderers.is_empty() {
+            let zones: Vec<_> = next.iter().map(|s| s.zone.clone()).collect();
+            self.next_block_renderer.draw_next(
+                res,
+                res.aspect_ratio,
+                &zones,
+                self.single_inversion,
+                disabled,
+                if disabled { &[] } else { &touches },
+                flip_x,
+            );
+        } else {
+            for (id, renderer) in self.next_layer_renderers.iter().enumerate() {
+                let zones: Vec<_> = next.iter().filter(|s| s.layer == id).map(|s| s.zone.clone()).collect();
+                if !res.no_effect {
+                    if let Some(skin) = self.next_layer_skins.get(id).and_then(Option::as_ref) {
+                        if !disabled && skin.render(res, &zones, &touches, parent) {
+                            continue;
+                        }
+                        // Disabled 层由皮肤自己的 disabled.glsl 画；皮肤已失败时退回原生材质。
+                        if disabled && !skin.failed() {
+                            continue;
+                        }
+                    }
+                }
+                renderer.draw_next(res, res.aspect_ratio, &zones, true, disabled, if disabled { &[] } else { &touches }, flip_x);
+            }
+        }
+    }
+
+    /// 当前时间的 RPEN 新格式噪区采样（带缓存；含相机投影）。
+    pub fn next_block_samples(&self, time: f64, aspect: f32) -> std::cell::Ref<'_, [super::rpe_next_block::Sample]> {
+        let mut cache = self.next_block_frame.borrow_mut();
+        let key = (time, aspect, self.next_block_areas.len());
+        if cache.0 != Some(key) {
+            cache.1.clear();
+            cache.1.extend(self.next_block_areas.iter().filter_map(|area| area.sample(time, aspect)));
+            if self.rpen.as_ref().is_some_and(|r| r.camera.is_some()) {
+                let projection = self.camera_matrix(time, aspect);
+                for sample in &mut cache.1 {
+                    sample.zone.projection = Some(projection);
+                }
+            }
+            cache.0 = Some(key);
+        }
+        drop(cache);
+        std::cell::Ref::map(self.next_block_frame.borrow(), |cache| cache.1.as_slice())
     }
 
     fn block_zones(&self, res: &Resource) -> Vec<Zone> {

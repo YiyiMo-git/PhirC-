@@ -193,17 +193,24 @@ pub async fn parse_extra(source: &str, fs: &mut dyn FileSystem) -> Result<ChartE
     let mut videos = Vec::new();
     #[cfg(feature = "video")]
     for video in ext.videos {
+        let path = video.path.clone();
+        // 谱包优先；谱包没有时回落到内置官方视频（assets/video/）。
+        // witness 类视频（如 TimeReverse_Video.mp4）在原游戏是内置资源，谱面只写文件名。
+        let data = match fs.load_file(&path).await {
+            Ok(data) => data,
+            Err(_) => macroquad::file::load_file(&format!("video/{path}"))
+                .await
+                .with_context(|| ptl!("video-load-failed", "path" => path.clone()))?,
+        };
         videos.push((
             Video::new(
-                fs.load_file(&video.path)
-                    .await
-                    .with_context(|| ptl!("video-load-failed", "path" => video.path.clone()))?,
+                data,
                 r.time(&video.time),
                 video.scale,
                 video.alpha.into(&mut r, Some(1.)),
                 video.dim.into(&mut r, Some(0.)),
             )
-            .with_context(|| ptl!("video-load-failed", "path" => video.path))?,
+            .with_context(|| ptl!("video-load-failed", "path" => path))?,
             video.attach,
         ));
     }

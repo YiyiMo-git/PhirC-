@@ -52,6 +52,13 @@ public class QuadNative {
     public native static void setInputText(String text);
 
     /**
+     * 上报设备实际能到的最大刷新率（含 alternativeRefreshRates）。
+     * Rust 侧存进 MAX_DEVICE_REFRESH_RATE，用于「请求值 > 设备上限」时自动收敛，
+     * 免得每帧都在申请一个永远到不了的帧率。
+     */
+    public native static void setMaxRefreshRate(float rate);
+
+    /**
      * Android 传感器上报当前摇动强度：线性加速度模长，单位 g（已去掉重力）。
      * 引擎用它做「摇一摇再玩」（静止自动暂停 / 摇动继续）。
      */
@@ -70,23 +77,35 @@ public class QuadNative {
      *  由 Java 主动调一次（Rust 侧有幂等保护，不会被启动两次）。 */
     public native static void startApp();
 
-    // ---- WebView 开始界面（webui feature）----
-    //
-    // Rust 侧符号：Java_quad_1native_QuadNative_webui*
-    // WebView 就绪后，JS 的 window.AndroidBridge.postMessage(json) 会打到
-    // WebUIView.Bridge，再由 WebUIView 转调 webuiIpc，最终进 Rust 的 handle_ipc。
-
-    /** JS → Rust 的一条 IPC 消息（JSON 字符串）；Rust 处理完把回包 eval 回页面。 */
-    public native static void webuiIpc(String json);
-
-    /** Rust → Java：WebView 是否已经创建并加载完成（决定要不要把画面交给它）。 */
-    public native static boolean webuiReady();
+    /**
+     * Android 输入法一次删除 N 个字符（`InputConnection.deleteSurroundingText` 的 beforeLength）。
+     *
+     * Rust 侧符号：Java_quad_1native_QuadNative_imeBackspace
+     *
+     * ⚠️ **不要**改成在 Java 侧连发 N 次 `surfaceOnKeyDown(KEYCODE_DEL)` —— 那 N 个事件
+     * 会在同一帧入队，而 macroquad 的 `keys_pressed` 是 `HashSet`，同一个键在同一帧多次
+     * 按下会坍缩成一次，结果只删掉 1 个字符（「选中一段后粘贴」的旧字符残留就是这么来的）。
+     */
+    public native static void imeBackspace(int n);
 
     /**
-     * Java → Rust：WebView 已建好**且首页加载完成**。
+     * Android 输入法提交一个字符（`InputConnection.commitText` 的 UTF-32 码点）。
      *
-     * 这是唯一允许把界面交给 WebView 的时机 —— Rust 收到后才会停止原生渲染。
-     * 提前交棒会黑屏（WebView 还没内容，而原生又不再画）。
+     * Rust 侧符号：Java_quad_1native_QuadNative_imeChar
+     *
+     * ⚠️ **不要**改成 `surfaceOnCharacter(char)`（UTF-16 code unit）—— 那个入口把字符
+     * 塞进 macroquad 的 `chars_pressed` 裸队列，IME 线程 push / 渲染线程 pop 之间**没有同步**，
+     * 是「输入框有时把整个软件卡死」的根因。这里走 Rust 的线程安全 `IME_BUFFER`
+     * （与 `imeBackspace` 同一个互斥锁），emoji / 生僻字用码点传入也不会被拆坏。
      */
-    public native static void webuiOnReady();
+    public native static void imeChar(int codepoint);
+
+    /**
+     * Android 输入法「完成 / 确定」（`InputConnection.performEditorAction`）。
+     *
+     * Rust 侧符号：Java_quad_1native_QuadNative_imeConfirm
+     *
+     * 语义 = 确认（等价于面板「确定」按钮）。同样走 `IME_BUFFER`，不碰 macroquad 的裸键队列。
+     */
+    public native static void imeConfirm();
 }

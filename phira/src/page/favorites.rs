@@ -16,7 +16,7 @@ use inputbox::{InputBox, InputMode};
 use macroquad::prelude::*;
 use prpr::{
     core::Tweenable,
-    ext::{open_url, semi_black, semi_white, RectExt, SafeTexture, ScaleType},
+    ext::{open_url, semi_black, RectExt, SafeTexture, ScaleType},
     scene::{request_input, show_error, show_message, take_input},
     task::Task,
     ui::{button_hit, DRectButton, Dialog, LoadingParams, RectButton, Scroll, Ui},
@@ -1132,7 +1132,10 @@ impl Page for FavoritesPage {
                     ui.dy(-ui.top + 0.03);
                     let s = 0.08;
                     let r = Rect::new(-s, 0., s, s);
-                    ui.fill_rect(r, (*self.icons.menu, r, ScaleType::Fit, WHITE));
+                    // ⚠️ 这一排图标画在**页面底**上。2026-10-09 改成 iOS 平面风格后，
+                    // 浅色主题的页面底是 `#F2F2F7` 浅灰 —— 所以不能再写死 `WHITE`，
+                    // 必须跟主题墨色走（深色主题=白 / 浅色主题=近黑）。
+                    ui.fill_rect(r, (*self.icons.menu, r, ScaleType::Fit, prpr::ui::theme::ink(1.)));
                     self.operations_menu_btn.set(ui, r);
                     if self.need_show_operations_menu {
                         self.need_show_operations_menu = false;
@@ -1144,7 +1147,7 @@ impl Page for FavoritesPage {
                     }
                     if get_data().collection_by_index(index).is_owned() {
                         ui.dx(-r.w - 0.03);
-                        ui.fill_rect(r, (*self.icons.edit, r, ScaleType::Fit, WHITE));
+                        ui.fill_rect(r, (*self.icons.edit, r, ScaleType::Fit, prpr::ui::theme::ink(1.)));
                         self.edit_btn.set(ui, r);
                         if self.need_show_edit_menu {
                             self.need_show_edit_menu = false;
@@ -1166,6 +1169,7 @@ impl Page for FavoritesPage {
                             },
                             r,
                             ScaleType::Fit,
+                            prpr::ui::theme::ink(1.),
                         ),
                     );
                     self.cloud_btn.set(ui, r);
@@ -1178,18 +1182,19 @@ impl Page for FavoritesPage {
                         self.cloud_menu.show(ui, t, Rect::new(r.x - d, r.bottom() + 0.02, r.w + d, h));
                     }
                     ui.dx(-r.w - 0.03);
-                    ui.fill_rect(r, (*self.icons.info, r, ScaleType::Fit));
+                    ui.fill_rect(r, (*self.icons.info, r, ScaleType::Fit, prpr::ui::theme::ink(1.)));
                     self.info_btn.set(ui, r);
 
                     ui.dx(-r.w - 0.03);
                     if self.fetch_like_task.is_some() {
-                        ui.fill_rect(r, (*self.icons.heart_outline, r, ScaleType::Fit, semi_white(0.4)));
+                        // 同上一排：压在页面底上 → 跟主题墨色（不能写死白）
+                        ui.fill_rect(r, (*self.icons.heart_outline, r, ScaleType::Fit, prpr::ui::theme::ink(0.4)));
                         let ct = r.center();
                         ui.loading(
                             ct.x,
                             ct.y,
                             t,
-                            WHITE,
+                            prpr::ui::theme::ink(1.),
                             LoadingParams {
                                 radius: r.w * 0.35,
                                 width: 0.008,
@@ -1198,7 +1203,11 @@ impl Page for FavoritesPage {
                         );
                     } else if get_data().collection_by_index(index).id.is_some() {
                         let icon = if self.liked { &self.icons.heart } else { &self.icons.heart_outline };
-                        ui.fill_rect(r, (**icon, r, ScaleType::Fit, if self.liked { ORANGE } else { WHITE }));
+                        // 已收藏 = 橙色（强调），未收藏 = 主题墨色
+                        ui.fill_rect(
+                            r,
+                            (**icon, r, ScaleType::Fit, if self.liked { ORANGE } else { prpr::ui::theme::ink(1.) }),
+                        );
                         self.like_btn.set(ui, r);
                     }
                 });

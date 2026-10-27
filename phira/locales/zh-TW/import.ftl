@@ -15,3 +15,5 @@ batch-import-failed-chart = 批次匯入失敗: { $chart }
 warning = 警告
 warning-new-speed-event = 該譜面使用了 RPE 1.7.0 引入的速度事件緩動。出於相容性考量，Phira 預設將沿用舊行為。如需啟用新特性，請在譜面資訊中勾選「RPE1.7新速度緩動」。
 warning-attach-ui = 該譜面使用了 UI 綁定。Phira 最近的版本引入了 UI 綁定的修復，但可能會導致依賴舊行為的譜面出現問題。如有必要，請在譜面資訊中取消勾選「UI 綁定修復」。
+
+warning-rpen-features = 該譜面使用了 RPEN 擴充特性（曲線軌跡 / 切線旋轉 / 判定線 BPM 倍率 / skewControl / 分層噪域 / shader 事件 / globalEvents 等），目前處於早期測試階段，可能出現顯示或判定異常。如有問題，請在譜面資訊中關閉「RPEN特性」回退舊版行為。

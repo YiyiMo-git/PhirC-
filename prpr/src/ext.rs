@@ -298,13 +298,18 @@ pub fn source_of_image(tex: &Texture2D, rect: Rect, scale_type: ScaleType) -> Op
 }
 
 pub fn draw_image(tex: Texture2D, rect: Rect, scale_type: ScaleType) {
+    draw_image_alpha(tex, rect, scale_type, WHITE);
+}
+
+/// 同 [`draw_image`]，但可以带颜色 / 不透明度（帧缓冲累积时用来半透明补背景）。
+pub fn draw_image_alpha(tex: Texture2D, rect: Rect, scale_type: ScaleType, color: Color) {
     let source = source_of_image(&tex, rect, scale_type);
     let (w, h) = (tex.width(), tex.height());
     draw_texture_ex(
         tex,
         rect.x,
         rect.y,
-        WHITE,
+        color,
         DrawTextureParams {
             source: source.map(|it| Rect::new(it.x * w, it.y * h, it.w * w, it.h * h)),
             dest_size: Some(rect.size()),

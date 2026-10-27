@@ -152,7 +152,9 @@ impl ChartsView {
         }
     }
 
-    /// 取走待打开的曲目详情（点卡片 → 曲库页拿它去开 SongDetailPage）。
+    /// 取走「刚点开的卡片」（点卡片 → 曲库页拿它去开打 / 塞进课题槽位）。
+    ///
+    /// 曲目详情页已删掉，这个名字是历史遗留。
     pub fn take_pending_detail(&mut self) -> Option<ChartItem> {
         self.pending_detail.take()
     }
@@ -695,6 +697,48 @@ impl ChartsView {
                 ui.fill_path(&path, semi_black(0.55));
             }
         }
+    }
+
+    /// 直接开打某张谱面（**跳过曲目详情页**）。
+    ///
+    /// 走的是和「`open_detail == false` 时点卡片」完全相同的那条路：建 `SongScene`
+    /// 挂到转场状态上，再由 [`Self::next_scene`] 交出去。
+    ///
+    /// `id` 用 `u32::MAX`：那个字段只给「返回 / 删除」的动画用（`self.charts[id]`），
+    /// 这里没有卡片下标，给个不可能命中的值让封面飞入动画自然跳过（`rect` 保持 `None`）。
+    pub fn start_chart(&mut self, chart: ChartItem, t: f32) -> Result<()> {
+        let download_path = chart.info.id.map(|it| format!("download/{it}"));
+        let scene = SongScene::new(
+            chart.clone(),
+            if let Some(path) = &chart.local_path {
+                Some(path.clone())
+            } else {
+                let path = download_path.clone().unwrap();
+                if Path::new(&format!("{}/{path}", dir::charts()?)).exists() {
+                    Some(path)
+                } else {
+                    None
+                }
+            },
+            Arc::clone(&self.icons),
+            self.rank_icons.clone(),
+            chart
+                .local_path
+                .as_ref()
+                .and_then(|path| get_data().charts.iter().find(|it| &it.local_path == path).map(|it| it.mods))
+                .unwrap_or_default(),
+        );
+        self.transit = Some(TransitState {
+            id: u32::MAX,
+            rect: None,
+            chart,
+            start_time: t,
+            next_scene: Some(NextScene::Overlay(Box::new(scene))),
+            back: false,
+            done: false,
+            delete: false,
+        });
+        Ok(())
     }
 
     pub fn next_scene(&mut self) -> Option<NextScene> {

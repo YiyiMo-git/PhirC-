@@ -7,7 +7,7 @@ use crate::{
     dir, get_data, get_data_mut,
     icons::Icons,
     newui::{self, Icon, Metrics},
-    page::{favorites::FAV_PAGE_RESULT, ChartItem, ChartType, Illustration, SongDetailPage},
+    page::{favorites::FAV_PAGE_RESULT, ChartItem, ChartType, Illustration},
     popup::Popup,
     rate::RateDialog,
     save_data,
@@ -46,6 +46,19 @@ use tap::Tap;
 use uuid::Uuid;
 
 pub static FAV_UPDATED: AtomicBool = AtomicBool::new(false);
+
+/// 「为浮层（B0 / RKS / 课题）而来」的原生曲库页：浮层一关就置位，
+/// 由 `MainScene::update` 消费。
+///
+/// ⚠️ 页面**不能**自己 `return NextScene::Pop`：那会被引擎理解成「弹掉整个
+/// MainScene」（它是场景栈的根），而不是弹页面栈 —— 早期就是这么写的，
+/// 结果弹回 WebView 从来没真正发生过，用户看到的就是「退出还是老界面」。
+pub static OVERLAY_RETURN: AtomicBool = AtomicBool::new(false);
+
+/// 取走「浮层关了，弹回 WebView 曲库」的请求。
+pub fn take_overlay_return() -> bool {
+    OVERLAY_RETURN.swap(false, Ordering::SeqCst)
+}
 pub static CHOOSE_COVER: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
@@ -53,6 +66,22 @@ thread_local! {
 }
 
 const PAGE_NUM: u64 = 28;
+
+/// WebView 曲库页请求展开的原生浮层。
+///
+/// 曲库页本体由 WebView 呈现（`library.html`），而**课题面板 / 自定义 RKS 编辑器 /
+/// 最佳谱面榜只有原生实现**。WebView 通过 `open_overlay` 桥先在这里记下「要开哪个」，
+/// 再让位给原生；`LibraryPage::enter` 取走它并展开对应浮层，用户原路就能退回 WebView。
+pub static PENDING_OVERLAY: Mutex<Option<OverlayKind>> = Mutex::new(None);
+
+/// 要展开的原生浮层。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OverlayKind {
+    /// 课题模式（T7.3）选曲面役
+    Challenge,
+    /// 最佳谱面榜（T7.2）
+    Board,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ChartListType {
@@ -166,6 +195,9 @@ pub struct LibraryPage {
     next_page_task: LocalTask<Result<NextPage>>,
 
     /// 课题模式（T7.3）的选择面板 + 待进入的课题场景。
+    /// 这一页是「WebView 曲库点 B0 / RKS / 课题」临时推起来的原生页：
+    /// 浮层关掉后要**自动弹回 WebView 曲库页**，别把用户丢在原生曲库上。
+    overlay_return: bool,
     challenge: crate::page::ChallengePanel,
     challenge_scene: Option<NextScene>,
     /// 自定义 RKS（T7.4）的编辑面板。
@@ -265,6 +297,7 @@ impl LibraryPage {
             next_page: None,
             next_page_task: None,
 
+            overlay_return: false,
             challenge: crate::page::ChallengePanel::new(),
             challenge_scene: None,
 
@@ -695,6 +728,21 @@ impl Page for LibraryPage {
         }
         // 每次进页面重放一遍入场动画
         self.enter_t = s.t;
+        // WebView 曲库页（`library.html`）请求展开的浮层：
+        // 课题面板 / 自定义 RKS 编辑器 / 最佳谱面榜。三者都只有原生实现，
+        // 所以由桥把请求记在 `PENDING_OVERLAY`，进页面时取走并展开。
+        if let Some(kind) = PENDING_OVERLAY.lock().unwrap().take() {
+            self.overlay_return = true;
+            match kind {
+                OverlayKind::Challenge => self.challenge.active = true,
+                OverlayKind::Board => {
+                    // 榜单要从本地曲库 + 成绩现算，先刷新一遍（`sync_local` 里也会刷）
+                    self.rks.refresh(&s.charts_local);
+                    let (entries, rks) = self.rks.best_board();
+                    self.best_board.show(entries, rks, s);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -763,6 +811,11 @@ impl Page for LibraryPage {
         // 课题模式（T7.3）：入口按钮 / 选择条 / 徽章弹窗优先吃掉触摸
         if !choose_cover && self.tabs.selected().ty == ChartListType::Local && self.challenge.touch(touch, t)? {
             if let Some(charts) = self.challenge.start.take() {
+                // 课题开局：把选择条收起来。
+                // ⚠️ 必须置 false：游戏结束后 `next_scene` 靠 `!challenge.active` 判断
+                // 「浮层已关、该弹回 WebView 曲库」。不收起的话游戏打完会停在原生曲库
+                // （用户看到的就是「从课题模式返回是老界面」）。
+                self.challenge.active = false;
                 self.challenge_scene = Some(NextScene::Overlay(Box::new(crate::scene::ChallengeScene::new(charts))));
             }
             return Ok(true);
@@ -778,13 +831,6 @@ impl Page for LibraryPage {
         {
             let (entries, rks) = self.rks.best_board();
             self.best_board.show(entries, rks, s);
-            return Ok(true);
-        }
-        // 自定义 RKS（T7.4）：入口按钮在未展开时也要能被点到；展开后独占触摸。
-        if !choose_cover && self.rks.touch(touch, t)? {
-            if self.rks.take_refresh_request() {
-                self.rks.refresh(&s.charts_local);
-            }
             return Ok(true);
         }
         let charts_view = &mut self.tabs.selected_mut().view;
@@ -841,12 +887,14 @@ impl Page for LibraryPage {
                         return Ok(true);
                     }
                     if self.fav_btn.touch(touch, t) {
-                        self.next_page = Some(NextPage::Overlay(Box::new(FavoritesPage::new(
-                            self.icons.clone(),
-                            self.rank_icons.clone(),
-                            self.current_fav_index,
-                            None,
-                        ))));
+                        // 「收藏集」入口改为打开资源包（WebView；WebView 不可用时回退原生 ResPackPage）
+                        if crate::webui::host_available() {
+                            crate::webui::open_respack();
+                        } else {
+                            self.next_page = Some(NextPage::Overlay(Box::new(
+                                crate::page::ResPackPage::new(Arc::clone(&self.icons))?,
+                            )));
+                        }
                         return Ok(true);
                     }
                 }
@@ -915,16 +963,13 @@ impl Page for LibraryPage {
     fn update(&mut self, s: &mut SharedState) -> Result<()> {
         let t = s.t;
 
-        // New UI：点卡片 → 打开曲目详情页；课题模式打开时改成把谱面塞进课题槽位
+        // New UI：点卡片 → 课题模式塞进槽位；否则**直接开打**
+        // （原来的「曲目详情页」已按用户要求删掉，不再作为中间页）。
         if let Some(chart) = self.tabs.selected_mut().view.take_pending_detail() {
             if self.challenge.active && self.tabs.selected().ty == ChartListType::Local {
                 self.challenge.select(chart);
             } else {
-                self.next_page = Some(NextPage::Overlay(Box::new(SongDetailPage::new(
-                    chart,
-                    Arc::clone(&self.icons),
-                    self.rank_icons.clone(),
-                )?)));
+                self.tabs.selected_mut().view.start_chart(chart, t)?;
             }
         }
 
@@ -1074,12 +1119,6 @@ impl Page for LibraryPage {
                 } else {
                     self.current_page = 0;
                     self.load_online();
-                }
-            } else if id == "rks:filter" {
-                self.rks.set_filter(text);
-            } else if id.starts_with("rks:") {
-                if let Err(err) = self.rks.input(&id, text) {
-                    show_error(err);
                 }
             } else if id == "new_fav" {
                 if text.is_empty() {
@@ -1516,17 +1555,7 @@ impl Page for LibraryPage {
             self.challenge.close();
         }
 
-        // 自定义 RKS（T7.4）：编辑器展开时整页让位给它
-        self.rks.begin_render();
         self.best_board.entry_active = false;
-        if self.rks.editing {
-            s.render_fader(ui, |ui| {
-                let area = ui.content_rect();
-                self.rks.render_overlay(ui, t, &m, area);
-                Ok::<(), anyhow::Error>(())
-            })?;
-            return Ok(());
-        }
 
         // ---- 版式：从顶到底单纯堆叠（头部行 → 分类条 / 列 + 网格），任何比例都不交叉 ----
         //
@@ -1629,7 +1658,7 @@ impl Page for LibraryPage {
             .as_ref()
             .map(|c| c.iter().filter(|i| i.chart.is_some()).count())
             .unwrap_or(0);
-        newui::set_status_extra(Some((format!("{count} 首曲目"), String::new())));
+        newui::set_status_extra(Some((tl!("chart-count", "count" => count.to_string()), String::new())));
 
         // 入场：头部下坠 + 网格淡入
         let enter = (t - self.enter_t).max(0.);
@@ -1647,7 +1676,6 @@ impl Page for LibraryPage {
                 });
             });
 
-            // 翻页
             if !is_local {
                 let p = newui::enter_p(enter, 0.15);
                 ui.alpha(p, |ui| self.render_pagination(ui, t, &m, &th, grid));
@@ -1739,10 +1767,22 @@ impl Page for LibraryPage {
             self.challenge_scene = None;
             return true;
         }
-        self.rks.back()
+        false
     }
 
     fn next_scene(&mut self, _s: &mut SharedState) -> NextScene {
+        // 「为浮层而来」的原生页：浮层一关就弹回 WebView 曲库页
+        // （否则用户关掉 B0/课题后会停在原生曲库这个「老界面」上）。
+        //
+        // ⚠️ 只能置位请 `MainScene::update` 代劳（跟左上角返回键同一条路：
+        // truncate 页面栈 + 显示 WebView）。返回 `NextScene::Pop` 会弹掉整个
+        // MainScene，那不是我们想要的。
+        if self.overlay_return && !self.challenge.active && !self.best_board.open {
+            self.overlay_return = false;
+            crate::webui::mark_handoff();
+            OVERLAY_RETURN.store(true, Ordering::SeqCst);
+            return NextScene::None;
+        }
         // 课题模式（T7.3）：选满三张、点了「开始课题」后接管整个场景
         if let Some(scene) = self.challenge_scene.take() {
             return scene;
@@ -1849,7 +1889,7 @@ impl LibraryPage {
             );
             let tx = sr.x + m.u(37. * lib_scale);
             if self.search_str.is_empty() {
-                newui::text(ui, m, "搜索曲名或曲师…", tx, sr.center().y, icon_base, th.text_mute, (0., 0.5));
+                newui::text(ui, m, tl!("search-hint"), tx, sr.center().y, icon_base, th.text_mute, (0., 0.5));
             } else {
                 newui::text_ellipsis(
                     ui,
@@ -1875,11 +1915,17 @@ impl LibraryPage {
 
         // ---- 排序 chips + 正倒序（设计稿 `.sort-group`；窄屏 / 空间不足隐藏，排序走操作菜单） ----
         if show_chips {
-            const ORDER_LABELS: [&str; 4] = ["默认", "曲名", "难度", "评分"];
+            // 排序标签走本地化：原来是 `const [&str; 4]`，`tl!` 不是 const，改成运行时数组。
+            let order_labels = [
+                tl!("order-default"),
+                tl!("order-name"),
+                tl!("order-difficulty"),
+                tl!("order-score"),
+            ];
             let mut cx = sr.right() + m.u(12.);
             for i in 0..4 {
-                let label = ORDER_LABELS[i];
-                let w = newui::measure(ui, m, label.to_owned(), 11.).w + m.u(26.);
+                let label = order_labels[i].clone();
+                let w = newui::measure(ui, m, label.clone(), 11.).w + m.u(26.);
                 let r = Rect::new(cx, tool_row.center().y - m.u(18.), w, m.u(36.));
                 let on = (i == 0 && self.current_order == ChartOrder::Default)
                     || (i == 1 && self.current_order == ChartOrder::Name)
@@ -2007,8 +2053,14 @@ impl LibraryPage {
                 self.order_meta_menu.show(ui, t, Rect::new(order_r.x, order_r.bottom() + m.u(4.), 0.35, 0.2));
             }
             if is_local {
-                let active = self.current_fav_index.is_some();
-                let _ = icon_btn(ui, &mut rx, &mut self.fav_btn, Icon::Star, active, if active { th.with_a(th.accent, 0.2) } else { th.wash(0.02) }, Some("fav"));
+                // 课题模式选曲中**不显示收藏夹**（用户要求）：这时点曲目就是加入课题，
+                // 收藏夹筛选只会干扰。不画就要 invalidate，否则会吃到上一帧的命中区。
+                if self.challenge.active {
+                    self.fav_btn.invalidate();
+                } else {
+                    let active = self.current_fav_index.is_some();
+                    let _ = icon_btn(ui, &mut rx, &mut self.fav_btn, Icon::Star, active, if active { th.with_a(th.accent, 0.2) } else { th.wash(0.02) }, Some("fav"));
+                }
                 if !multi_select {
                     let _ = icon_btn(ui, &mut rx, &mut self.import_btn, Icon::Plus, false, th.wash(0.02), Some("import"));
                 } else {
@@ -2018,32 +2070,27 @@ impl LibraryPage {
                 let _ = icon_btn(ui, &mut rx, &mut self.filter_btn, Icon::Filter, false, th.wash(0.02), Some("filter"));
             }
 
-            // 课题模式（T7.3）+ 自定义 RKS（T7.4）+ 最佳谱面榜（T7.2）：
-            // 工具行最左侧的三个文字入口
+            // 课题模式（T7.3）+ 最佳谱面榜（T7.2）：工具行最左侧的两个文字入口
+            // （自定义 RKS 编辑器已于 2026-10-23 删除，入口一并去掉）
             if show_entries {
                 let h = m.u(46.);
                 let cw = m.u(160.);
-                let rw = m.u(120.);
                 let bw = m.u(110.);
                 let challenge_r = Rect::new(rx - cw, icons_row.center().y - h / 2., cw, h);
-                let rks_r = Rect::new(challenge_r.x - m.u(6.) - rw, challenge_r.y, rw, h);
-                let board_r = Rect::new(rks_r.x - m.u(6.) - bw, challenge_r.y, bw, h);
+                let board_r = Rect::new(challenge_r.x - m.u(6.) - bw, challenge_r.y, bw, h);
                 // 边界：横屏以**搜索框右缘**为界（同一行，不能压到搜索栏）；
                 // 竖屏入口在**独立的图标行**上，以该行左缘为界即可。
                 let left_limit = if compact { icons_row.x } else { sr.right() } + m.u(12.);
                 if board_r.x > left_limit {
                     let n = self.rks.best_board_count();
                     self.best_board.render_entry(ui, t, board_r, n);
-                    self.rks.render_entry(ui, t, m, rks_r);
                     self.challenge.render_entry(ui, t, challenge_r);
                 } else {
                     self.best_board.hide_entry();
-                    self.rks.hide_entry();
                     self.challenge.hide_entry();
                 }
             } else {
                 self.best_board.hide_entry();
-                self.rks.hide_entry();
                 self.challenge.hide_entry();
             }
         }
@@ -2054,7 +2101,9 @@ impl LibraryPage {
     /// 底部翻页条（上架 / 特殊 / 未上架 / 热门）。
     fn render_pagination(&mut self, ui: &mut Ui, t: f32, m: &Metrics, th: &newui::Theme, grid: Rect) {
         let total_page = self.total_page();
-        if total_page <= 0 {
+        // ⚠️ total_page 是 usize，`<= 0` 恒等于 `== 0`（clippy 的
+        // absurd_extreme_comparisons 是 deny 级，会让 `cargo clippy` 直接失败）。
+        if total_page == 0 {
             return;
         }
         let cy = grid.bottom() + m.u(14.);

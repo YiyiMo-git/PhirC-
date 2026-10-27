@@ -17,7 +17,8 @@ use prpr::{
 };
 
 /// 选择条的高度（设计 px，交给 [`Metrics::u`] 换算）。
-pub const SELECTOR_HEIGHT_PX: f32 = 96.;
+/// 用户要求「放大放长」：96 → 132。
+pub const SELECTOR_HEIGHT_PX: f32 = 132.;
 
 pub struct ChallengePanel {
     pub active: bool,
@@ -250,10 +251,14 @@ impl ChallengePanel {
         let th = newui::theme();
         if self.active {
             self.area = strip;
-            newui::acrylic(ui, strip, m.u(10.), &th);
-            let pad = m.u(10.);
-            let btn_h = m.u(30.);
-            let right_w = m.u(150.);
+            // 用户要求：**黑色半透明平行四边形**（斜切）—— 保留 Phigros 的斜切语言，
+            // 不用磨砂、也不用扁平圆角卡片。
+            let skew = strip.h * 0.10;
+            newui::skew_rect(ui, strip, skew, Color::new(0., 0., 0., 0.45));
+            newui::skew_stroke(ui, strip, skew, m.u(1.), th.border);
+            let pad = m.u(12.);
+            let btn_h = m.u(38.);
+            let right_w = m.u(168.);
             let right_x = strip.right() - pad - right_w;
             let row1 = Rect::new(right_x, strip.y + pad, right_w, btn_h);
             let row2 = Rect::new(right_x, strip.bottom() - pad - btn_h, right_w, btn_h);
@@ -261,58 +266,69 @@ impl ChallengePanel {
             let bw = (right_w - m.u(8.)) / 3.;
             let mut x = right_x;
             for (btn, label) in [(&mut self.cancel, "取消"), (&mut self.clear, "清空"), (&mut self.save_selection, "保存")] {
-                btn.render_text(ui, Rect::new(x, row1.y, bw, btn_h), t, label, m.f(13.), false);
+                btn.render_text(ui, Rect::new(x, row1.y, bw, btn_h), t, label, m.f(15.), false);
                 x += bw + m.u(4.);
             }
             // 右下：开始（未选满时灰显）
             if self.ready() {
-                self.begin.render_text(ui, row2, t, "开始课题", m.f(14.), true);
+                self.begin.render_text(ui, row2, t, "开始课题", m.f(17.), true);
             } else {
-                ui.fill_path(&row2.rounded(m.u(8.)), th.wash(0.02));
-                newui::rounded_stroke(ui, row2, m.u(8.), m.u(1.), th.border);
-                newui::text_center(ui, m, "选满 3 张后开始", row2.center().x, row2.center().y, 13., th.text_mute);
+                ui.fill_path(&row2.rounded(m.u(10.)), th.wash(0.02));
+                newui::rounded_stroke(ui, row2, m.u(10.), m.u(1.), th.border);
+                newui::text_center(ui, m, "选满 3 张后开始", row2.center().x, row2.center().y, 15., th.text_mute);
             }
-            // 左侧：三个曲目槽位
+            // 左侧：三个曲目槽位 —— **曲目顺序（第 1/2/3 首）做主标签**，定数退成副信息
             let slots_w = right_x - strip.x - pad * 2.;
-            let sw = (slots_w - m.u(8.) * 2.) / 3.;
+            let sw = (slots_w - m.u(10.) * 2.) / 3.;
             for i in 0..3 {
-                let sr = Rect::new(strip.x + pad + i as f32 * (sw + m.u(8.)), strip.y + pad, sw, strip.h - pad * 2.);
+                let sr = Rect::new(strip.x + pad + i as f32 * (sw + m.u(10.)), strip.y + pad, sw, strip.h - pad * 2.);
                 let focused = self.selected.focused == i;
-                ui.fill_path(&sr.rounded(m.u(8.)), if focused { th.with_a(th.accent, 0.14) } else { th.wash(0.03) });
+                ui.fill_path(&sr.rounded(m.u(10.)), if focused { th.with_a(th.accent, 0.14) } else { th.wash(0.03) });
                 newui::rounded_stroke(
                     ui,
                     sr,
-                    m.u(8.),
+                    m.u(10.),
                     m.u(1.),
                     if focused { th.with_a(th.glow, 0.6) } else { th.border },
                 );
                 // 整块可点（切聚焦），右上角的小叉负责删除
                 self.positions[i].build(ui, t, sr, |_, _| {});
-                newui::text(ui, m, ["1st", "2nd", "3rd"][i], sr.x + m.u(10.), sr.y + m.u(12.), 11., th.text_mute, (0., 0.5));
+                // 曲目顺序：主标签（大号 + 强调色），不再是角落里的小字
+                newui::text(
+                    ui,
+                    m,
+                    ["第 1 首", "第 2 首", "第 3 首"][i],
+                    sr.x + m.u(12.),
+                    sr.y + m.u(17.),
+                    17.,
+                    if focused { th.accent } else { th.text_hi },
+                    (0., 0.5),
+                );
                 match &self.selected.slots[i] {
                     Some(chart) => {
-                        let cover = Rect::new(sr.x + m.u(10.), sr.y + m.u(24.), m.u(40.), m.u(40.));
+                        let cover = Rect::new(sr.x + m.u(12.), sr.y + m.u(30.), m.u(54.), m.u(54.));
                         chart.illu.notify();
-                        ui.fill_path(&cover.rounded(m.u(6.)), chart.illu.shading(cover, t));
-                        let tx = cover.right() + m.u(8.);
-                        let max_w = (sr.right() - m.u(10.) - tx).max(m.u(20.));
-                        newui::text_ellipsis(ui, m, chart.info.name.clone(), tx, sr.y + m.u(30.), 13., max_w, th.text_hi, (0., 0.5));
+                        ui.fill_path(&cover.rounded(m.u(8.)), chart.illu.shading(cover, t));
+                        let tx = cover.right() + m.u(10.);
+                        let max_w = (sr.right() - m.u(12.) - tx).max(m.u(20.));
+                        newui::text_ellipsis(ui, m, chart.info.name.clone(), tx, sr.y + m.u(42.), 16., max_w, th.text_hi, (0., 0.5));
+                        // 定数退成副信息（小一号、暗一档）
                         let label = crate::challenge::difficulty_label(&chart.info.level, chart.info.difficulty as f64);
                         newui::text(
                             ui,
                             m,
                             format!("{label}  {:.1}", chart.info.difficulty),
                             tx,
-                            sr.y + m.u(50.),
-                            12.,
+                            sr.y + m.u(64.),
+                            13.,
                             th.text_dim,
                             (0., 0.5),
                         );
-                        let rr = Rect::new(sr.right() - m.u(26.), sr.y + m.u(4.), m.u(22.), m.u(22.));
-                        self.remove[i].render_text(ui, rr, t, "×", m.f(13.), false);
+                        let rr = Rect::new(sr.right() - m.u(30.), sr.y + m.u(6.), m.u(26.), m.u(26.));
+                        self.remove[i].render_text(ui, rr, t, "×", m.f(15.), false);
                     }
                     None => {
-                        newui::text_center(ui, m, "点击曲目加入", sr.center().x, sr.center().y + m.u(6.), 13., th.text_mute);
+                        newui::text_center(ui, m, "点击曲目加入", sr.center().x, sr.center().y + m.u(12.), 15., th.text_mute);
                     }
                 }
             }

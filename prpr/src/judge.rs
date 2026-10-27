@@ -87,6 +87,7 @@ fn get_uptime() -> f64 {
     miniquad::native::windows::get_uptime()
 }
 
+#[derive(Clone)]
 pub struct FlickTracker {
     threshold: f32,
     last_point: Point,
@@ -135,7 +136,7 @@ impl FlickTracker {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum JudgeStatus {
     NotJudged,
     PreJudge,
@@ -221,7 +222,7 @@ pub struct JudgeReportEvent {
 }
 
 #[cfg(not(closed))]
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct JudgeInner {
     diffs: Vec<f64>,
 
@@ -404,6 +405,17 @@ pub struct Judge {
     pub miss_marks: Vec<MissMark>,
 }
 
+/// 时间倒流的判定状态快照（[`Judge::snapshot`] / [`Judge::restore`]）。
+#[derive(Clone)]
+pub struct JudgeSnapshot {
+    notes: Vec<(Vec<u32>, usize)>,
+    trackers: Vec<(u64, FlickTracker)>,
+    last_time: f64,
+    key_down_count: u32,
+    inner: JudgeInner,
+    recent: Vec<(Judgement, f64)>,
+}
+
 /// 一次漏键（Bad / Miss）在判定线上的落点。
 #[derive(Clone, Copy, Debug)]
 pub struct MissMark {
@@ -465,6 +477,33 @@ impl Judge {
         self.judgements.borrow_mut().clear();
         self.feedback.clear();
         self.recent_judgements.clear();
+        self.miss_marks.clear();
+    }
+
+    /// 时间倒流：抓一份完整判定状态（音符游标 / flick 追踪 / 计分内核 / 判定文字）。
+    /// 纯数据拷贝，开销与已判定音符数线性；game.rs 每 0.5s 存一份、保留约 6 秒。
+    pub fn snapshot(&self) -> JudgeSnapshot {
+        JudgeSnapshot {
+            notes: self.notes.clone(),
+            trackers: self.trackers.iter().map(|(k, v)| (*k, v.clone())).collect(),
+            last_time: self.last_time,
+            key_down_count: self.key_down_count,
+            inner: self.inner.clone(),
+            recent: self.recent_judgements.clone(),
+        }
+    }
+
+    /// 恢复到快照时刻：判定文字保留到当时点，feedback / 漏键标记清掉。
+    /// 注意：**音符的 `judge` 状态由 game.rs 一并恢复**（要和这里的游标对齐）。
+    pub fn restore(&mut self, s: JudgeSnapshot) {
+        self.notes = s.notes;
+        self.trackers = s.trackers.into_iter().collect();
+        self.last_time = s.last_time;
+        self.key_down_count = s.key_down_count;
+        self.inner = s.inner;
+        self.judgements.borrow_mut().clear();
+        self.feedback.clear();
+        self.recent_judgements = s.recent;
         self.miss_marks.clear();
     }
 
@@ -563,6 +602,17 @@ impl Judge {
     }
 
     pub(crate) fn on_new_frame() {
+        // 回放播放：有注入的合成触摸就直接用，**跳过 macroquad 采集**
+        // （整条判定 / flick 管线因此原样复用，无需任何分支）。
+        if let Some(touches) = crate::replay::take_playback_touches() {
+            TOUCHES.with(|it| {
+                *it.borrow_mut() = TouchStatus {
+                    touches,
+                    ..Default::default()
+                };
+            });
+            return;
+        }
         let mut handler = Handler {
             status: TouchStatus::default(),
             wheel: (0., 0.),
@@ -621,6 +671,12 @@ impl Judge {
                 })
                 .collect()
         })
+    }
+
+    /// 录制的原始触摸：**不做任何坐标变换**（与 `on_new_frame` 采集时同基准）。
+    /// 回放注入时也按这个基准原样送回，保证「录什么播什么」。
+    pub(crate) fn raw_touches() -> Vec<Touch> {
+        TOUCHES.with(|it| it.borrow().touches.clone())
     }
 
     pub fn update(&mut self, res: &mut Resource, chart: &mut Chart, bad_notes: &mut Vec<BadNote>) {
@@ -752,19 +808,35 @@ impl Judge {
             .collect();
         // 噪区：落在生效阻挡区（enableTime <= t < disableTime）内的触摸从触摸列表里移除，
         // 下面的音符因此判定不到，自然成为 Miss。
-        if !chart.block_areas.is_empty() {
+        if !chart.block_areas.is_empty() || !chart.next_block_areas.is_empty() {
             let aspect = res.aspect_ratio;
             let areas = &chart.block_areas;
+            let single = chart.single_inversion;
+            let projected = chart.projected_chart();
+            // 新格式噪区按 `Area::sample` 的时间轴取采样；层分配 / 反转都在
+            // `rpe_next_block::blocked` 里按层独立统计。
+            let next = chart.next_block_samples(t, aspect);
+            // 有相机时触点要先从屏幕空间反投影回谱面空间；
+            // 反投影失败（在可视深度之外）→ 触点不在谱面内，直接忽略。
             let mut blocked = Vec::new();
             touches.retain(|touch| {
-                let p = Vector::new(touch.position.x, -touch.position.y);
-                if block_touch_blocked(areas, p, t, aspect) {
+                let raw = Vector::new(touch.position.x, -touch.position.y);
+                let p = if projected {
+                    chart.unproject_touch(raw, t, aspect).unwrap_or(raw)
+                } else {
+                    raw
+                };
+                // 旧噪区走旧规则；RPEN 新格式区域走分层 + single 反转规则。
+                let hit = block_touch_blocked(areas, p, t, aspect)
+                    || crate::core::rpe_next_block::blocked(&next, p, aspect, single);
+                if hit {
                     blocked.push((touch.id, p));
                     false
                 } else {
                     true
                 }
             });
+            drop(next);
             chart.blocked_touches = blocked;
         }
         // pos[line][touch]
@@ -807,7 +879,16 @@ impl Judge {
                 continue;
             }
             let t = time_of(touch);
-            let mut closest = (None, x_diff_max, limit_bad, limit_bad + (x_diff_max / NOTE_WIDTH_RATIO_BASE - 1.).max(0.) * dist_factor);
+            // 第 5 槽 = 已选候选的**原始 dt**（未经红黄键偏移），保护窗比较要用；
+            // 第 6 槽 = 已选候选是否为 Tap/Hold（蓝键），避免再借 chart 造成借用冲突。
+            let mut closest: (Option<(usize, u32)>, f64, f64, f64, f64, bool) = (
+                None,
+                x_diff_max,
+                limit_bad,
+                limit_bad + (x_diff_max / NOTE_WIDTH_RATIO_BASE - 1.).max(0.) * dist_factor,
+                f64::INFINITY,
+                false,
+            );
             for (line_id, ((line, pos), (idx, st))) in chart.lines.iter_mut().zip(pos.iter()).zip(self.notes.iter_mut()).enumerate() {
                 let Some(pos) = pos[id] else {
                     continue;
@@ -851,6 +932,7 @@ impl Judge {
                     {
                         continue;
                     }
+                    let raw_dt = dt;
                     let dt = if matches!(note.kind, NoteKind::Flick | NoteKind::Drag) {
                         dt + limit_good
                     } else {
@@ -858,11 +940,43 @@ impl Judge {
                     };
                     let key = dt + (dist / NOTE_WIDTH_RATIO_BASE - 1.).max(0.) * dist_factor;
                     if key < closest.3 {
-                        closest = (Some((line_id, *id)), dist, dt, key);
+                        // —— 本家保护窗（对齐 Phira-Pro 的 `rules.protection_ms`）——
+                        // 蓝键（Tap/Hold）与红黄键（Flick/Drag）之间设 10ms 保护窗：
+                        // 窗内**不让「谁时间更近」直接决定归属**，优先保蓝键 ——
+                        // 红黄键是「手指顺带碰到」的，不该把同一时刻要打的蓝键抢走。
+                        //   * 已选蓝键、新来红黄键 → 必须明显更早（超出保护窗）才能取代；
+                        //   * 已选红黄键、新来蓝键 → 只要不比它晚超过保护窗就抢回来。
+                        // 红键（Flick）的保护可重复触发；黄键（Drag）被跳过时不 arm 判定，
+                        // 所以「单次保护」语义天然成立。
+                        const PROTECTION_SEC: f64 = 0.010;
+                        let mut accept = true;
+                        if closest.0.is_some() {
+                            let new_is_tap = matches!(note.kind, NoteKind::Click | NoteKind::Hold { .. });
+                            if closest.5 != new_is_tap {
+                                let delta = raw_dt - closest.4;
+                                accept = if closest.5 {
+                                    // 已选蓝键：红黄键要明显更早才抢
+                                    delta < -PROTECTION_SEC
+                                } else {
+                                    // 已选红黄键：蓝键不比它晚太多就抢回来
+                                    delta <= PROTECTION_SEC
+                                };
+                            }
+                        }
+                        if accept {
+                            closest = (
+                                Some((line_id, *id)),
+                                dist,
+                                dt,
+                                key,
+                                raw_dt,
+                                matches!(note.kind, NoteKind::Click | NoteKind::Hold { .. }),
+                            );
+                        }
                     }
                 }
             }
-            if let (Some((line_id, id)), _, dt, _) = closest {
+            if let (Some((line_id, id)), _, dt, _, _, _) = closest {
                 let line = &mut chart.lines[line_id];
                 if matches!(line.notes[id as usize].kind, NoteKind::Drag) {
                     debug!("reject by drag");

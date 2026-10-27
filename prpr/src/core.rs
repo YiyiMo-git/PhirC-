@@ -26,15 +26,23 @@ pub use anim::{Anim, AnimFloat, AnimVector, Keyframe};
 
 mod block;
 pub use block::{
-    block_touch_blocked, touch_inset_world, BlockArea, BlockMoveEvent, BlockPhase, BlockRotateEvent, BlockScaleEvent, BlockTransform,
+    block_touch_blocked, block_touch_blocked_layered, touch_inset_world, BlockArea, BlockMoveEvent, BlockPhase, BlockRotateEvent, BlockScaleEvent, BlockTransform,
 };
+pub use block::DEFAULT_BLOCK_COLOR;
 
 mod blockarea;
+pub mod rpen_scene;
+/// RPEN 新格式噪区（`blockAreaList` 的 `bottomLeft` 版本）：独立的时间轴/变换模型。
+pub mod rpe_next_block;
+/// RPEN 噪域皮肤（`noiseAreaLayers[].skin`）：每层独立 Pass 的自定义效果。
+pub mod rpen_skin;
 pub(crate) use blockarea::BlockAudio;
 pub(crate) use blockarea::reset_block_effects;
-pub use blockarea::{draw_disabled_zones, draw_zones, draw_zones_with_touches, Zone};
+pub use blockarea::{draw_disabled_zones, draw_zones, draw_zones_with_touches, BlockRenderer, Zone};
 /// 噪区遮罩分辨率（设置滑块 / 存档加载用）。
 pub use blockarea::{mask_divisor, set_mask_divisor, MAX_MASK_DIVISOR, MIN_MASK_DIVISOR};
+/// 噪区低性能模式（掩码更粗 + 跳过触摸 pass → 开销约降到 1/4）。
+pub use blockarea::{low_performance, set_low_performance};
 /// 噪区着色器的编译错误（`None` = 编译成功）。给「设置 → 日志」页显示。
 pub use blockarea::{block_shader_error, force_block_shader_init};
 

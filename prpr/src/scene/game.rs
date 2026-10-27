@@ -3,7 +3,7 @@
 prpr_l10n::tl_file!("game");
 
 use super::{
-    draw_background,
+    draw_background, draw_background_alpha,
     ending::RecordUpdateState,
     loading::{BasicPlayer, SaveFn, UpdateFn, UploadFn},
     request_input, return_input, show_message, take_input, EndingScene, NextScene, Scene,
@@ -17,7 +17,7 @@ use crate::{
     ext::{draw_text_aligned_opt_width_using, draw_text_aligned_using, parse_time, screen_aspect, semi_white, RectExt, SafeTexture, ScaleType},
     fs::FileSystem,
     info::{ChartFormat, ChartInfo},
-    judge::{Judge, JudgeReportEvent, Judgement},
+    judge::{Judge, JudgeReportEvent, Judgement, JudgeSnapshot},
     parse::{parse_extra, parse_pec, parse_phigros, parse_rpe},
     task::Task,
     time::TimeManager,
@@ -223,6 +223,9 @@ pub enum GameMode {
     Exercise,
     NoRetry,
     View,
+    /// 回放播放：判定照常跑（观感必须和当年一致），但不计成绩 / 不上传 /
+    /// 不写历史；输入由回放驱动合成注入。见 `crate::replay`。
+    Replay,
 }
 
 #[derive(Clone)]
@@ -276,6 +279,15 @@ pub struct GameScene {
     state: State,
     pub last_update_time: f64,
     pause_rewind: Option<f64>,
+    /// 开场时长（默认 `BEFORE_TIME`；渲染模式可由 config 覆盖成 Phi Recorder 的 1.2s）。
+    intro_time: f64,
+    /// 开场淡入是否用线性曲线（渲染模式对齐 phire）。
+    intro_linear: bool,
+    /// 时间倒流剩余次数（进入时从 config.rewind_count 取，段位考核强制 0）。
+    rewind_left: u32,
+    /// 时间倒流快照：(谱面时间, 判定状态, 每线音符判定状态)。0.5s 一存、保留 6.5s。
+    rewind_snaps: std::collections::VecDeque<(f64, JudgeSnapshot, Vec<Vec<crate::judge::JudgeStatus>>)>,
+    rewind_last: f64,
     pause_first_time: f32,
     /// 摇一摇再玩：是否为「因为静止而自动暂停」（只自动恢复自己暂停的）
     paused_by_motion: bool,
@@ -373,7 +385,17 @@ impl GameScene {
         let bytes = Self::load_chart_bytes(fs, info).await.context("Failed to load chart")?;
         let format = Self::infer_chart_format(info, &bytes);
         let mut chart = match format {
-            ChartFormat::Rpe => parse_rpe(&String::from_utf8_lossy(&bytes), fs, extra, info.use_rpe_170_speed.unwrap_or_default()).await,
+            // `use_rpen`：谱面信息里的「RPEN 特性」开关（None = 按导入时探测到的值）。
+            ChartFormat::Rpe => {
+                parse_rpe(
+                    &String::from_utf8_lossy(&bytes),
+                    fs,
+                    extra,
+                    info.use_rpe_170_speed.unwrap_or_default(),
+                    info.use_rpen.unwrap_or_default(),
+                )
+                .await
+            }
             ChartFormat::Pgr => parse_phigros(&String::from_utf8_lossy(&bytes), extra),
             ChartFormat::Pec => parse_pec(&String::from_utf8_lossy(&bytes), extra),
             ChartFormat::Pbc => {
@@ -418,6 +440,17 @@ impl GameScene {
             chart.extra.effects.clear();
             chart.extra.global_effects.clear();
         }
+        // —— 全局着色器（设置 → 通用）：把选中的内置预设叠加到所有谱面 ——
+        // 放在 NO_SHADER 清空之后、尊重它（mod 开着就什么 shader 都不出）。
+        if !config.global_shader.is_empty() && !config.mods.contains(Mods::NO_SHADER) {
+            match Effect::get_preset(&config.global_shader) {
+                Some(src) => match Effect::new(0.0..f64::INFINITY, src, Vec::new(), false) {
+                    Ok(effect) => chart.extra.effects.push(effect),
+                    Err(err) => warn!(?err, "global shader load failed"),
+                },
+                None => warn!("global shader preset not found: {}", config.global_shader),
+            }
+        }
         let effects = std::mem::take(&mut chart.extra.global_effects);
         if config.fxaa {
             chart
@@ -438,6 +471,9 @@ impl GameScene {
         }
 
         let info_offset = info.offset;
+        // 时间倒流次数（config 马上要 move 进 Resource，先取出来）
+        let rewind_count = config.rewind_count;
+        let render_intro = config.render_intro_secs;
         let mut res = Resource::new(
             config,
             info,
@@ -445,7 +481,8 @@ impl GameScene {
             player.as_ref().and_then(|it| it.avatar.clone()),
             background,
             illustration,
-            chart.extra.effects.is_empty() && effects.is_empty(),
+            // RPEN 自定义噪域皮肤是后处理，必须保留 chart render target。
+            chart.extra.effects.is_empty() && effects.is_empty() && !chart.has_rpen_skins(),
         )
         .await
         .context("Failed to load resources")?;
@@ -491,6 +528,11 @@ impl GameScene {
             state: State::Starting,
             last_update_time: 0.,
             pause_rewind: None,
+            intro_time: if render_intro > 0. { render_intro } else { Self::BEFORE_TIME },
+            intro_linear: render_intro > 0.,
+            rewind_left: rewind_count,
+            rewind_snaps: std::collections::VecDeque::new(),
+            rewind_last: f64::NEG_INFINITY,
             pause_first_time: f32::NEG_INFINITY,
             paused_by_motion: false,
             still_time: 0.,
@@ -564,8 +606,12 @@ impl GameScene {
         let time = tm.now();
         let p = match self.state {
             State::Starting => {
-                if time <= Self::BEFORE_TIME {
-                    1. - (1. - time / Self::BEFORE_TIME).powi(3)
+                if time <= self.intro_time {
+                    if self.intro_linear {
+                        (time / self.intro_time).clamp(0., 1.)
+                    } else {
+                        1. - (1. - time / self.intro_time).powi(3)
+                    }
                 } else {
                     1.
                 }
@@ -716,7 +762,7 @@ impl GameScene {
                     let combo_top = btm + label_gap;
                     self.chart
                         .with_element(ui, res, UIElement::Combo, None, (0., combo_top + unit_h * 0.2), |ui, c| {
-                            draw_text_aligned_opt_width_using(ui, font, &combo_label, 0., combo_top, (0.5, 0.), label_size, c, max_width);
+                            draw_text_aligned_opt_width_using(ui, font, combo_label, 0., combo_top, (0.5, 0.), label_size, c, max_width);
                         });
                 } else {
                     let ct = ui.text(&combo).size(combo_size).measure_using(font).center();
@@ -730,10 +776,10 @@ impl GameScene {
                             .draw_using(font)
                             .bottom()
                     });
-                    let ct = ui.text(&*combo_label).size(label_size).measure_using(font).center();
+                    let ct = ui.text(combo_label).size(label_size).measure_using(font).center();
                     let combo_top = btm + label_gap + ct.y;
                     self.chart.with_element(ui, res, UIElement::Combo, None, (0., combo_top), |ui, c| {
-                        draw_text_aligned_opt_width_using(ui, font, &combo_label, 0., combo_top, (0.5, 0.5), label_size, c, max_width);
+                        draw_text_aligned_opt_width_using(ui, font, combo_label, 0., combo_top, (0.5, 0.5), label_size, c, max_width);
                     });
                 }
             }
@@ -908,6 +954,27 @@ impl GameScene {
                     ..Default::default()
                 },
             );
+            // —— 时间倒流按钮（resume 右侧；重意图标旋转 180°）——
+            let rewindable = self.mode == GameMode::Normal && self.rewind_left > 0 && !self.dead;
+            if rewindable {
+                draw_texture_ex(
+                    *res.icon_retry,
+                    s * 3. + w,
+                    -s + o,
+                    c,
+                    DrawTextureParams {
+                        dest_size: Some(vec2(s * 2., s * 2.)),
+                        rotation: std::f32::consts::PI,
+                        ..Default::default()
+                    },
+                );
+                ui.text(format!("×{}", self.rewind_left))
+                    .size(0.035)
+                    .pos(s * 3. + w + s, s * 0.62 + o)
+                    .anchor(0.5, 0.)
+                    .color(c)
+                    .draw();
+            }
             if res.config.interactive {
                 let mut clicked = None;
                 for touch in Judge::get_touches() {
@@ -916,7 +983,7 @@ impl GameScene {
                     }
                     let p = touch.position;
                     let p = Point::new(p.x, p.y);
-                    for i in -1..=1 {
+                    for i in -1..=(if rewindable { 2 } else { 1 }) {
                         let ct = Point::new((s * 2. + w) * i as f32, o);
                         let d = p - ct;
                         if d.x.abs() <= s && d.y.abs() <= s {
@@ -963,6 +1030,54 @@ impl GameScene {
                         }
                         #[cfg(target_env = "ohos")]
                         miniquad::native::set_interceptor_state(true);
+                    }
+                    Some(2) => {
+                        // —— 时间倒流：恢复约 3 秒前的完整状态 ——
+                        // 判定（连击/计数/误差）/ 音符消费状态 / flick 追踪整体回滚，
+                        // 真正撤销 3 秒内的 Miss（区别于暂停继续的「只回退时间」）。
+                        let now = tm.now();
+                        let snap = self
+                            .rewind_snaps
+                            .iter()
+                            .rev()
+                            .find(|(t, _, _)| now - *t >= 3.)
+                            .or_else(|| self.rewind_snaps.front())
+                            .cloned();
+                        if let Some((target, jsnap, note_states)) = snap {
+                            let back = (now - target).max(0.05);
+                            self.rewind_left -= 1;
+                            let mut pos = self.music.position();
+                            if self.mode == GameMode::Exercise {
+                                pos = tm.now();
+                            }
+                            self.music.play()?;
+                            res.time -= back;
+                            let dst = pos - back;
+                            if dst < 0. {
+                                self.music.pause()?;
+                                self.state = State::BeforeMusic;
+                            } else {
+                                self.music.seek_to(dst)?;
+                            }
+                            let now2 = tm.now();
+                            tm.speed = res.config.speed as _;
+                            tm.resume();
+                            tm.seek_to(now2 - back);
+                            self.pause_rewind = Some(tm.now() - 0.2);
+                            self.judge.restore(jsnap);
+                            for (line, states) in self.chart.lines.iter_mut().zip(note_states) {
+                                for (note, st) in line.notes.iter_mut().zip(states) {
+                                    note.judge = st;
+                                }
+                            }
+                            for line in self.chart.lines.iter_mut() {
+                                line.cache.reset(&mut line.notes);
+                            }
+                            self.rewind_snaps.clear();
+                            self.rewind_last = tm.now();
+                            #[cfg(target_env = "ohos")]
+                            miniquad::native::set_interceptor_state(true);
+                        }
                     }
                     Some(1) => {
                         if self.mode == GameMode::Exercise && (tm.now() > self.exercise_range.end || tm.now() < self.exercise_range.start) {
@@ -1851,7 +1966,7 @@ impl Scene for GameScene {
         let time = tm.now();
         let time = match self.state {
             State::Starting => {
-                if time >= Self::BEFORE_TIME {
+                if time >= self.intro_time {
                     self.res.alpha = 1.;
                     self.state = State::BeforeMusic;
                     tm.reset();
@@ -1879,7 +1994,11 @@ impl Scene for GameScene {
                         self.res.emitter.emitter.config = emitter_config;
                         self.res.emitter.emitter_square.config = emitter_square_config;
                     }
-                    self.res.alpha = (1. - (1. - time / Self::BEFORE_TIME).powi(3)) as f32;
+                    self.res.alpha = if self.intro_linear {
+                        (time / self.intro_time).clamp(0., 1.) as f32
+                    } else {
+                        (1. - (1. - time / Self::BEFORE_TIME).powi(3)) as f32
+                    };
                     if self.mode == GameMode::Exercise {
                         self.exercise_range.start
                     } else {
@@ -1929,7 +2048,9 @@ impl Scene for GameScene {
                         && !self.res.config.mods.intersects(Mods::UNRATED)
                         && !self.res.config.use_keyboard
                         && self.res.config.speed >= 1.0 - 1e-3
-                        && self.res.config.note_map.is_identity();
+                        && self.res.config.note_map.is_identity()
+                        // 流速改过也不上传（与 song.rs 的 `rated` 保持一致）。
+                        && self.res.config.note_flow_speed_is_default();
                     let record_data = match (can_upload, &self.player, &self.res.info.id) {
                         (true, Some(player), Some(chart)) => Some(crate::record::encode_record(
                             player.id,
@@ -1954,12 +2075,47 @@ impl Scene for GameScene {
                         })
                     };
                     self.next_scene = match self.mode {
+                        // 回放播放：照样出结算画面（得分 / 准度照实算），但不写本地成绩、
+                        // 不更新最佳记录、不上传 —— 它只是「看当年这一局」。
+                        GameMode::Replay => Some(NextScene::Overlay(Box::new(EndingScene::new(
+                            self.res.background.clone(),
+                            self.res.illustration.clone(),
+                            self.res.player.clone(),
+                            self.res.icons.clone(),
+                            self.res.icon_retry.clone(),
+                            self.res.icon_proceed.clone(),
+                            self.res.mod_icons.clone(),
+                            self.res.challenge_icons[self.res.config.challenge_color as usize].clone(),
+                            self.res.config.challenge_rank,
+                            self.res.info.clone(),
+                            self.judge.result(no_combo_score),
+                            &self.res.config,
+                            self.res.res_pack.ending.clone(),
+                            None,
+                            self.player.as_ref().map(|it| it.rks),
+                            0,
+                            None,
+                            self.best_record.clone(),
+                            None,
+                            if self.res.config.show_avg_fps { self.get_avg_fps() } else { None },
+                        )?))),
                         GameMode::Normal | GameMode::NoRetry | GameMode::View => {
                             let historic_best = self.player.as_ref().map_or(0, |it| it.historic_best);
+                            // 结算画面 NEW BEST 用的「原最佳 + 多出分数」。
+                            // ⚠️ 必须在更新 best_record **之前**取原最佳分数，
+                            // 否则拿不到旧值。没有原记录（第一次玩）就不算新纪录
+                            // —— 没有「原分数」可显示。
+                            let mut new_best: Option<(i32, i32)> = None;
                             if let Some(new_rec) = &record {
                                 if let Some(f) = &self.save_fn {
                                     f(new_rec.clone())?;
                                 }
+                                new_best = match &self.best_record {
+                                    Some(best) if new_rec.score > best.score => {
+                                        Some((best.score, new_rec.score - best.score))
+                                    }
+                                    _ => None,
+                                };
                                 if let Some(best) = &mut self.best_record {
                                     best.update(new_rec);
                                 } else {
@@ -1990,6 +2146,7 @@ impl Scene for GameScene {
                                 historic_best,
                                 record_data,
                                 self.best_record.clone(),
+                                new_best,
                                 if self.res.config.show_avg_fps { self.get_avg_fps() } else { None },
                             )?)))
                         }
@@ -2004,6 +2161,26 @@ impl Scene for GameScene {
         let time = (time - offset as f64).max(0.);
         self.res.time = time;
         if !tm.paused() && self.pause_rewind.is_none() && self.mode != GameMode::View {
+            // 回放录制：在判定消费本帧触摸**之前**抄一份原始触摸
+            // （回放系统见 crate::replay；没在录制时是零开销的 Option 检查）。
+            // —— 时间倒流：定期快照判定与音符状态（仅正常模式；次数用完就不再存）——
+            if self.mode == GameMode::Normal && self.rewind_left > 0 {
+                let now = tm.now();
+                if now - self.rewind_last >= 0.5 {
+                    self.rewind_last = now;
+                    let notes = self
+                        .chart
+                        .lines
+                        .iter()
+                        .map(|l| l.notes.iter().map(|n| n.judge).collect::<Vec<_>>())
+                        .collect();
+                    self.rewind_snaps.push_back((now, self.judge.snapshot(), notes));
+                    while self.rewind_snaps.front().is_some_and(|(t, _, _)| now - *t > 6.5) {
+                        self.rewind_snaps.pop_front();
+                    }
+                }
+            }
+            crate::replay::record_frame(self.res.time, &self.judge);
             self.gl.quad_gl.viewport(self.res.camera.viewport);
             self.judge.update(&mut self.res, &mut self.chart, &mut self.bad_notes);
             self.gl.quad_gl.viewport(None);
@@ -2019,7 +2196,7 @@ impl Scene for GameScene {
         // 装饰性准度条：消费本帧新增的判定（`feedback` 只保留最近 2 秒，故按时间戳增量喂）。
         if self.res.config.timing_bar.enabled {
             let cfg = self.res.config.timing_bar.clone();
-            let rt = tm.real_time() as f64;
+            let rt = tm.real_time();
             for (what, diff, at) in &self.judge.feedback {
                 if *at > self.timing_bar_seen {
                     self.timing_bar.record(
@@ -2228,8 +2405,39 @@ impl Scene for GameScene {
             render_target: chart_onto,
             ..Default::default()
         });
-        clear_background(BLACK);
-        draw_background(*res.background);
+        // 只在画面完全不透明时启用累积：开场淡入 / 结尾淡出必须走正常清屏路径，
+        // 否则固定的 fade 会把 1.2s 淡入压成几帧、结尾也来不及淡出。
+        let preserve = res.config.preserve_framebuffer && res.alpha >= 0.999;
+        if preserve {
+            // ============================================================
+            // 帧缓冲累积（Phi Recorder 的 `preserve_framebuffer`）
+            // 不清屏：先用半透明黑把上一帧压暗，再按**同样**的不透明度把背景补回来。
+            // 于是移动的判定线 / 音符 / 粒子会留下连续残影（不是离散拷贝），
+            // 而背景亮度会收敛到正常值，不会越拖越黑。
+            // ============================================================
+            let fade = res.config.render_fade_value();
+            let h = 1. / res.aspect_ratio;
+            if res.time <= 0.05 {
+                clear_background(BLACK); // 第一帧：清掉上一局残留
+            }
+            draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., fade));
+            // 背景暗度合成：0.3（draw_background 自带）× (1-谱面暗度) × (1-render_bg_dim 补的 0.286)
+            let mut k = 0.7 * (1. - res.info.background_dim.clamp(0., 1.));
+            if res.config.render_bg_dim {
+                k *= 0.714;
+            }
+            draw_background_alpha(*res.background, Color::new(k, k, k, fade));
+        } else {
+            clear_background(BLACK);
+            draw_background(*res.background);
+            // 离线渲染：补到 Phi Recorder 的 `render_bg_dim` 暗度。
+            // 本函数上面已经压过 0.3，phire 的 `draw_background(dim)` 是 0.5；
+            // 要总暗度相等：1-(0.7)(1-e)(0.4) = 1-(0.5)(0.4) → e ≈ 0.286
+            if res.config.render_bg_dim {
+                let h = 1. / res.aspect_ratio;
+                draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., 0.286 * res.alpha));
+            }
+        }
         pop_camera_state();
 
         let chart_target_vp = if res.chart_target.is_some() {
@@ -2242,7 +2450,9 @@ impl Scene for GameScene {
         self.gl.quad_gl.viewport(chart_target_vp);
 
         let h = 1. / res.aspect_ratio;
-        draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
+        if !preserve {
+            draw_rectangle(-1., -h, 2., h * 2., Color::new(0., 0., 0., res.alpha * res.info.background_dim));
+        }
 
         // 音乐可视化：每帧算一次频谱（判定线渲染时读它画条）
         if res.config.music_spectrum {
@@ -2413,6 +2623,8 @@ impl Scene for GameScene {
                 }
                 // not sure if they need result. just keep it
                 GameMode::Exercise | GameMode::NoRetry | GameMode::View => NextScene::Pop,
+                // 回放中途退出：不回传成绩（SongScene 的 Drop 会清掉回放态）
+                GameMode::Replay => NextScene::Pop,
                 GameMode::TweakOffset => NextScene::PopWithResult(Box::new(None::<f32>)),
             }
         } else if let Some(next_scene) = self.next_scene.take() {

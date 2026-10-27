@@ -154,6 +154,10 @@ fn parse_block_areas(list: Vec<PgrBlockArea>) -> Vec<BlockArea> {
             disable_time: b.disable_time,
             disappear_time: b.disappear_time,
             is_subtract: b.is_subtract,
+            // 官方谱面不分层，全部落在第 0 层。
+            layer: 0,
+            // 官方 blockAreaList 没有颜色，一律用原生红。
+            color: crate::core::DEFAULT_BLOCK_COLOR,
             rotate_events: b
                 .rotate_events
                 .into_iter()

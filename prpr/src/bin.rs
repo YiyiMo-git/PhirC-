@@ -13,7 +13,7 @@
 use crate::{
     core::{
         Anim, AnimVector, BezierTween, BpmList, Chart, ChartExtra, ChartSettings, ClampedTween, CtrlObject, JudgeLine, JudgeLineCache, JudgeLineKind,
-        Keyframe, Note, NoteKind, Object, StaticTween, Tweenable, UIElement,
+        AnimFloat, Keyframe, Note, NoteKind, Object, StaticTween, Tweenable, UIElement,
     },
     judge::{HitSound, JudgeStatus},
     parse::process_lines,
@@ -298,21 +298,30 @@ impl BinaryData for Object {
 
 impl BinaryData for CtrlObject {
     fn read_binary<R: Read>(r: &mut BinaryReader<R>) -> Result<Self> {
-        assert_eq!(r.read::<u8>()?, 8);
-        Ok(Self {
+        // tag 8 = 加 RPEN skew 之前的旧格式（读进来 skew 保持默认）；
+        // tag 9 = 带 skew 的新格式。**必须兼容 8**，否则老的 .pbc 谱面直接 assert 失败。
+        let tag = r.read::<u8>()?;
+        assert!(tag == 8 || tag == 9, "CtrlObject: unsupported tag {tag}");
+        let mut out = Self {
             alpha: r.read()?,
             size: r.read()?,
             pos: r.read()?,
             y: r.read()?,
-        })
+            skew: AnimFloat::default(),
+        };
+        if tag >= 9 {
+            out.skew = r.read()?;
+        }
+        Ok(out)
     }
 
     fn write_binary<W: Write>(&self, w: &mut BinaryWriter<W>) -> Result<()> {
-        w.write_val(8_u8)?;
+        w.write_val(9_u8)?;
         w.write(&self.alpha)?;
         w.write(&self.size)?;
         w.write(&self.pos)?;
         w.write(&self.y)?;
+        w.write(&self.skew)?;
         Ok(())
     }
 }

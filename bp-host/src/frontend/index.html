@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>bp-host · 加入房间</title>
+  <link rel="stylesheet" href="./design-tokens.css" />
+  <link rel="stylesheet" href="./wireframe.css" />
+  <link rel="stylesheet" href="./app.css" />
+</head>
+
+<body class="app-plain app-shell">
+  <main id="stage" class="entry-hero">
+    <article class="turn-card">
+      <h1 class="card-title">bp-host · BP 赛事主持</h1>
+      <p class="card-subtitle">主办方在本机进入控制台；选手 / 观众经浏览器加入（同一 Wi-Fi 或公网提示地址）。</p>
+    </article>
+    <article class="card" id="panel"><!-- 入口由 index-entry 模块填充 --></article>
+    <p class="card-subtitle">地址与端口全部来自主机配置；房间码来自同源 /api/status，页面零硬编码地址。</p>
+  </main>
+
+  <script type="module" src="./dist/app-index.js"></script>
+  <!-- 入口逻辑抽出为 entry-index.ts，经 tools/build-frontend.cjs 打包为 dist/app-index.js（自执行） -->
+</body>
+
+</html>

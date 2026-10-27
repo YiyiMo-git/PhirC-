@@ -13,10 +13,15 @@ pub use pgr::parse_phigros;
 mod rpe;
 pub use rpe::{lint, parse_rpe, RPE_HEIGHT, RPE_WIDTH};
 
+pub mod rpen;
+
 #[derive(Debug, Default)]
 pub struct ParseWarnings {
     pub has_new_speed_events: bool,
     pub has_attach_ui: bool,
+    /// 谱面用了 RPEN 扩展特性（曲线轨迹 / skewControl / bpmfactor / 分层噪域 / shader 事件…）。
+    /// 导入时据此弹早期测试警告，并作为 `ChartInfo::use_rpen` 的默认值。
+    pub has_rpen_features: bool,
 }
 
 pub(crate) fn process_lines(v: &mut [crate::core::JudgeLine]) {

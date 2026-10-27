@@ -45,3 +45,10 @@ multi-select-all = 全选
 multi-select-invert = 反选
 
 fav-created = 收藏夹已创建
+
+chart-count = { $count } 首曲目
+search-hint = 搜索曲名或曲师…
+order-default = 默认
+order-name = 曲名
+order-difficulty = 难度
+order-score = 评分

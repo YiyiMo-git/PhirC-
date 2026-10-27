@@ -86,6 +86,9 @@ pub struct CtrlObject {
     pub size: AnimFloat,
     pub pos: AnimFloat,
     pub y: AnimFloat,
+    /// RPEN `skewControl`：音符的倾斜量（度）。采样轴与其它控制量一致（按高度取）。
+    /// 非 RPEN 谱面保持默认（空），音符渲染不受影响。
+    pub skew: AnimFloat,
 }
 
 impl CtrlObject {
@@ -94,5 +97,6 @@ impl CtrlObject {
         self.size.set_time(height);
         self.pos.set_time(height);
         self.y.set_time(height);
+        self.skew.set_time(height);
     }
 }

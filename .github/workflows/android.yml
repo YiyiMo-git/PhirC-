@@ -22,7 +22,7 @@ concurrency:
 env:
   PHIRA_ANDROID_ABI: arm64-v8a
   ANDROID_TRIPLE: aarch64-linux-android
-  PRPR_AVC_FFMPEG_VERSION: 20260309_v0
+  PRPR_AVC_FFMPEG_VERSION: 20260730_v0
 
 jobs:
   apk:
@@ -103,6 +103,17 @@ jobs:
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk --locked
+
+      # video 功能要链 FFmpeg 静态库（prpr-avc 的 build.rs 只负责 -L，库得自己放好）。
+      # 注意：CI 钉的 20260309_v0 没有 Windows/Android 资产，这里统一用 20260330_v0。
+      - name: Download FFmpeg static libs (prpr-avc)
+        run: |
+          set -euo pipefail
+          mkdir -p prpr-avc/static-lib/${{ env.ANDROID_TRIPLE }}
+          curl -sSL --retry 3 -o avc-libs.tar.gz \
+            https://github.com/TeamFlos/prpr-avc-ffmpeg/releases/download/${PRPR_AVC_FFMPEG_VERSION}/${{ env.ANDROID_TRIPLE }}.tar.gz
+          tar -xzf avc-libs.tar.gz -C prpr-avc/static-lib/${{ env.ANDROID_TRIPLE }}
+          ls -la prpr-avc/static-lib/${{ env.ANDROID_TRIPLE }}/
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
@@ -185,11 +196,10 @@ jobs:
       - name: Build Rust library (libphira.so)
         run: |
           set -euo pipefail
-          # video 功能需要 FFmpeg 静态库（上游的 iOS 包是坏的），这里同样用
-          # --no-default-features 关掉 video；--features webui 开启 WebView 开始页
-          # （Android 走 phira/src/webui_android.rs 的 JNI 宿主，本地交叉编译已验证）。
+          # 带 video：链上一步下载的 FFmpeg 静态库（aarch64-linux-android）。
+          # 界面走 WebView（webui）或 Rust 原生 UI，与 video 无关。
           cargo ndk -t ${{ env.PHIRA_ANDROID_ABI }} -o android/app/src/main/jniLibs \
-            build --release -p phira --no-default-features --features webui
+            build --release -p phira --no-default-features --features video
           JNI="android/app/src/main/jniLibs/${{ env.PHIRA_ANDROID_ABI }}"
           ls -lh "$JNI/"
           file "$JNI/libphira.so"

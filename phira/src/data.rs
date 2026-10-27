@@ -151,6 +151,9 @@ pub struct Data {    pub me: Option<User>,
     pub theme: usize,
     pub tokens: Option<(String, String)>,
     pub respacks: Vec<String>,
+    /// PhiC 剧情章节（`.pic` 导入）。存 `data/chapters/<uuid>/`。
+    #[serde(default)]
+    pub chapters: Vec<Uuid>,
     pub respack_id: usize,
     pub accept_invalid_cert: bool,
     // for compatibility
@@ -164,11 +167,6 @@ pub struct Data {    pub me: Option<User>,
     pub anys_gateway: String,
 
     pub prefer_reduced_motion: bool,
-
-    /// 关掉 WebView 界面（登录 / 开始 / 曲库）的 TriGrid 动态背景。
-    /// 默认 false = 开；关掉后不再跑全屏着色器，能明显省 GPU、界面更跟手。
-    /// 用「关闭」语义存，是为了让 `Default::default()`（新装、无 data.json）天然等于「开」。
-    pub webui_bg_disabled: bool,
 
     #[serde(default, rename = "collections")]
     collections_legacy: Vec<LocalCollection>,
@@ -371,6 +369,7 @@ impl Data {
             .block_mask_divisor
             .clamp(prpr::core::MIN_MASK_DIVISOR, prpr::core::MAX_MASK_DIVISOR);
         prpr::core::set_mask_divisor(self.config.block_mask_divisor);
+        prpr::core::set_low_performance(self.config.block_area_low_performance);
         PREFER_REDUCED_MOTION.store(self.prefer_reduced_motion, Ordering::Relaxed);
         Ok(())
     }
@@ -437,5 +436,36 @@ impl Data {
             })
             .value()
             .clone()
+    }
+}
+
+#[cfg(test)]
+mod real_data_tests {
+    /// 用真实 data.json 验证反序列化（`PHIRA_DATA_JSON=<路径>`）。
+    #[test]
+    fn loads_real_data_json() {
+        let Ok(path) = std::env::var("PHIRA_DATA_JSON") else { return };
+        let text = std::fs::read_to_string(&path).unwrap();
+        let d: super::Data = serde_json::from_str(&text).expect("data.json 反序列化失败");
+        eprintln!("[data] charts = {} / config.mods = {:?}", d.charts.len(), d.config.mods);
+        assert!(!d.charts.is_empty(), "charts 为空");
+    }
+}
+
+#[cfg(test)]
+mod init_repro {
+    /// 复现启动时的 `Data::init()`：切到真实 exe 目录，读 data.json 再 init，
+    /// 看 charts 会不会被 retain / 集合同步清掉。
+    #[test]
+    fn init_keeps_real_charts() {
+        let Ok(dir) = std::env::var("PHIRA_DATA_DIR") else { return };
+        std::env::set_current_dir(&dir).unwrap();
+        let text = std::fs::read_to_string("data/data.json").unwrap();
+        let mut d: super::Data = serde_json::from_str(&text).unwrap();
+        let before = d.charts.len();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        rt.block_on(d.init()).unwrap();
+        eprintln!("[init] charts {} -> {}（集合 {} 个）", before, d.charts.len(), d.collection_uuids.len());
+        assert!(d.charts.len() > 0, "init 之后 charts 被清空");
     }
 }

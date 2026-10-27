@@ -234,8 +234,8 @@ impl Page for MessagePage {
         // 面板圆角（New UI 语言）
         let radius = m.u(10.);
         s.render_fader(ui, |ui| {
-            // 左栏 = 磨砂亚克力卡片，取代原来的半透明黑块
-            // （半透明黑在浅色主题下会变成深灰底 + 深色字，等于看不见）
+            // 左栏 = 扁平实色卡片（iOS inset grouped；acrylic 名字带 acrylic，
+            // 实际是不透明 bg_elev + 1px 细边，不是磨砂）
             crate::newui::acrylic(ui, r, radius, &th);
             let ct = r.center();
             let pad = m.u(10.);
@@ -253,20 +253,24 @@ impl Page for MessagePage {
                             let w = r.w - pad * 2.;
                             let mut h = 0.;
                             let row_h = m.u(58.);
-                            let gap = m.u(6.);
+                            // iOS 分组列表：行与行**紧贴**（没有间隙），分隔靠发丝线。
+                            // 原来是「每行一张独立圆角卡 + 6px 间隙」，那是卡片语言的观感。
+                            let gap = 0.;
+                            let n = msgs.len();
                             for (index, item) in msgs.iter_mut().enumerate() {
-                                // 行卡片：内边距 + 圆角 + 悬停 / 选中反馈
                                 let row = Rect::new(pad, h, w, row_h);
                                 let selected = Some(index) == self.index;
                                 let hover = ui.rect_to_global(row).contains(mouse);
                                 // 未读：比上次已读时间新
                                 let unread = get_data().message_check_time.is_none_or(|it| it < item.0.time);
                                 let (msg, btn) = (&item.0, &mut item.1);
+                                let last = index + 1 == n;
                                 btn.build(ui, t, row, |ui, _path| {
+                                    // 行自己不画卡片：底板是外层面板，
+                                    // 这里只叠选中态，再交给 `group_row` 画悬停 + 内缩发丝线。
+                                    // 行比面板窄，所以 `radius` 传 0（悬停就是一块方角高亮）。
                                     if selected {
-                                        // 选中：强调色淡填充 + 描边 + 左侧强调条
-                                        crate::newui::rounded(ui, row, m.u(8.), th.with_a(th.glow, 0.16));
-                                        crate::newui::rounded_stroke(ui, row, m.u(8.), m.u(1.), th.with_a(th.glow, 0.5));
+                                        crate::newui::rounded(ui, row, m.u(6.), th.with_a(th.glow, 0.16));
                                         crate::newui::accent_bar(
                                             ui,
                                             Rect::new(row.x, row.y + m.u(11.), m.u(2.), row.h - m.u(22.)),
@@ -274,11 +278,18 @@ impl Page for MessagePage {
                                             th.teal,
                                             m.u(1.),
                                         );
-                                    } else if hover {
-                                        // 悬停：主题中性填充（深色加白 / 浅色加黑）
-                                        crate::newui::rounded(ui, row, m.u(8.), th.wash(0.07));
-                                        crate::newui::rounded_stroke(ui, row, m.u(8.), m.u(1.), th.border);
                                     }
+                                    crate::newui::group_row(
+                                        ui,
+                                        &th,
+                                        row,
+                                        if hover && !selected { 1. } else { 0. },
+                                        index == 0,
+                                        last,
+                                        0.,
+                                        m.u(14.),
+                                        Color::new(0., 0., 0., 0.),
+                                    );
                                     let tx = row.x + m.u(14.);
                                     let tw = (row.w - m.u(28.) - if unread { m.u(12.) } else { 0. }).max(m.u(10.));
                                     // 标题：大一号、高对比
@@ -309,7 +320,7 @@ impl Page for MessagePage {
             }
         });
         s.render_fader(ui, |ui| {
-            // 右栏 = 磨砂亚克力详情面板
+            // 右栏 = 扁平实色详情面板（同左栏）
             crate::newui::acrylic(ui, cr, radius, &th);
 
             if let Some(msg) = self.index.and_then(|it| self.msgs.as_ref().map(|msgs| &msgs[it].0)) {
@@ -322,7 +333,22 @@ impl Page for MessagePage {
                     r.x -= r.w;
                     r.y -= r.h;
                     for (btn, action) in self.action_btns.iter_mut().zip(&msg.actions) {
-                        btn.render_text(ui, r, t, &action.name, 0.5, false);
+                        // ⚠️ 不用 `render_text` —— 它内部走 `glass_plate`（磨砂玻璃 + 投影 + 悬停上浮），
+                        // 和设置页 / 消息列表的扁平语言不一致。这里自己画：强调色底 + 圆角 + 白字。
+                        let radius = m.u(10.);
+                        btn.build(ui, t, r, |ui, _path| {
+                            crate::newui::rounded(ui, r, radius, th.accent);
+                            crate::newui::rounded_stroke(ui, r, radius, m.u(1.), th.border);
+                        });
+                        let ct = r.center();
+                        ui.text(&action.name)
+                            .pos(ct.x, ct.y)
+                            .anchor(0.5, 0.5)
+                            .no_baseline()
+                            .max_width(r.w)
+                            .size(0.5)
+                            .color(th.text_hi)
+                            .draw();
                         ui.dy(-r.h - m.u(10.));
                     }
                 });

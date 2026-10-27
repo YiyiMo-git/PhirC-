@@ -11,23 +11,31 @@ mod censor;
 mod challenge;
 /// 课题模式（T7.3）：徽章绘制与槽位弹窗。
 mod challenge_ui;
+mod chart_core;
 mod charts_view;
+#[path = "../../sensitive/auth/client.rs"]
 mod client;
 /// 自定义 RKS（T7.4）：本地计算与配置读写。
 mod custom_rks;
 mod daily;
 mod data;
 mod history;
+pub mod growth;
 mod hud;
 mod icons;
 mod ime;
 mod images;
+#[path = "../../sensitive/auth/login.rs"]
 mod login;
 mod mp;
 mod newui;
 mod page;
+mod phic;
 mod popup;
+mod editor;
 mod rate;
+mod record;
+mod replay;
 mod resource;
 mod scene;
 mod tabs;
@@ -36,18 +44,29 @@ mod threed;
 /// 应用自绘的功能件（目前是取代原生对话框的文本输入框）。
 mod ui;
 mod uml;
+/// WebView 开始界面宿主（把 `kaichang/index.html` 当开始页显示）。
+/// Windows：wry + WebView2；安卓：JNI → Java `WebViewHost`；
+/// iOS：C 函数边界 → `ios/webview.m`（WKWebView + `phirc://` scheme handler）。
+#[cfg(any(
+    all(target_os = "windows", feature = "webui"),
+    target_os = "android",
+    target_os = "ios"
+))]
 mod webui;
-/// 开始页 5 个按钮的**原生触摸命中**（绕开 JS 注入；iOS 上启用，见 `webui_hit::ENABLED`）。
-mod webui_hit;
-/// 开始页内嵌资源表（跨平台共用；Windows 走自定义协议、Android 走 Java 内存表）。
-#[cfg(feature = "webui")]
-mod webui_assets;
-#[cfg(all(target_os = "android", feature = "webui"))]
-mod webui_android;
-#[cfg(all(target_os = "ios", feature = "webui"))]
-mod webui_ios;
-#[cfg(all(target_os = "windows", feature = "webui"))]
-mod webui_windows;
+/// 其余平台 / 未启用 `webui`：空实现，界面照旧走 macroquad 原生 UI。
+#[cfg(not(any(
+    all(target_os = "windows", feature = "webui"),
+    target_os = "android",
+    target_os = "ios"
+)))]
+mod webui {
+    pub fn init_host() {}
+
+    /// 没有 WebView 时，永远没有「待开局谱面」。
+    pub fn take_next_scene(_s: &mut crate::page::SharedState) -> Option<prpr::scene::NextScene> {
+        None
+    }
+}
 
 use anyhow::Result;
 use data::Data;
@@ -93,7 +112,7 @@ use jni::{
 /// 更糟的是日志目录也来自同一个字符串，于是连一行 `[rust stage]` 都写不进去，
 /// 表现就是「黑屏闪退 + 日志里只有 Java 侧的行」。
 #[cfg(target_os = "android")]
-fn read_java_string(env: &mut EnvUnowned, s: &JString, what: &str) -> Option<String> {
+pub(crate) fn read_java_string(env: &mut EnvUnowned, s: &JString, what: &str) -> Option<String> {
     if s.is_null() {
         return None;
     }
@@ -238,6 +257,11 @@ mod dir {
         ensure("data/collections")
     }
 
+    /// PhiC 剧情章节目录（`.pic` 导入到这里）。
+    pub fn chapters() -> Result<String> {
+        ensure("data/chapters")
+    }
+
     pub fn custom_charts() -> Result<String> {
         ensure("data/charts/custom")
     }
@@ -379,31 +403,45 @@ async fn the_main() -> Result<()> {
     PGR_FONT.with(move |it| *it.borrow_mut() = Some(TextPainter::new(pgr_font, Some(game_font))));
     crash_log_stage("已加载 phigros.ttf");
 
-    // 界面（菜单 / 设置页）的内置字体**也用 font.ttf**（Source Han Sans + Saira + Noto，
-    // 都是 OFL 系字体）。原来用的是 assets/pingfang.otf，那是苹果的 PingFang SC，
-    // **不允许随应用再分发**，开源发布会有授权问题，所以换成这套自带的。
-    // 两份 painter 共用同一个 FontArc（Arc 引用计数），不会把 13MB 字体在内存里存两遍。
-    // 界面字体用 assets/ui-font.otf（用户指定的 PingFang-Mod SC Medium）。
-    // 历史上这里换过两次：`assets/pingfang.otf`（苹果 PingFang SC，不允许再分发）→
-    // `assets/harmonyos.ttf`（HarmonyOS Sans SC，免费商用）。现在按用户要求用
-    // PingFang-Mod 这一版；**保留 harmonyos.ttf 作为兜底**，这样万一发布目录里
-    // 还没放 ui-font.otf，也只是字体回退，不会因为读不到文件而启动即退出。
+    // 界面（菜单 / 设置页 / B0 / RKS 等原生页）的内置字体。
+    //
+    // 2026-10-23：用户要求**原生 UI 与 WebView 页统一字体** —— WebView 各页
+    // （设置 / 曲库 / 开始页…）用的是 `kaichang/cmdysj.ttf`，所以这里改成优先加载
+    // 根 `assets/cmdysj.ttf`（从 kaichang 复制来的同一份），原生界面终于和设置页同字体。
+    //
+    // 历史：`assets/pingfang.otf`（苹果 PingFang SC，不允许再分发）→
+    // `assets/harmonyos.ttf`（HarmonyOS Sans SC，免费商用）→
+    // `assets/ui-font.otf`（PingFang-Mod SC Medium）→ 现在 `cmdysj.ttf`。
+    // 保留 ui-font.otf / harmonyos.ttf 作兜底：万一发布目录里没有 cmdysj.ttf，
+    // 也只是字体回退，不会因为读不到文件而启动即退出。
     // 这跟游戏内文字用的 font.ttf 是两套字体，风格不同是有意的。
     // 设置里导入的自定义界面字体依然优先（写到 <data>/font.ttf）。
-    let builtin_ui_font = match load_file("ui-font.otf").await {
+    let builtin_ui_font = match load_file("cmdysj.ttf").await {
         Ok(bytes) => match FontArc::try_from_vec(bytes) {
             Ok(font) => font,
             Err(err) => {
-                warn!("ui-font.otf 解析失败（{err:?}），回退 harmonyos.ttf");
-                FontArc::try_from_vec(load_file("harmonyos.ttf").await?)?
+                warn!("cmdysj.ttf 解析失败（{err:?}），回退 ui-font.otf");
+                match FontArc::try_from_vec(load_file("ui-font.otf").await?) {
+                    Ok(font) => font,
+                    Err(err) => {
+                        warn!("ui-font.otf 解析失败（{err:?}），回退 harmonyos.ttf");
+                        FontArc::try_from_vec(load_file("harmonyos.ttf").await?)?
+                    }
+                }
             }
         },
         Err(err) => {
-            warn!("ui-font.otf 读取失败（{err}），回退 harmonyos.ttf");
-            FontArc::try_from_vec(load_file("harmonyos.ttf").await?)?
+            warn!("cmdysj.ttf 读取失败（{err}），回退 ui-font.otf");
+            match FontArc::try_from_vec(load_file("ui-font.otf").await?) {
+                Ok(font) => font,
+                Err(err) => {
+                    warn!("ui-font.otf 解析失败（{err:?}），回退 harmonyos.ttf");
+                    FontArc::try_from_vec(load_file("harmonyos.ttf").await?)?
+                }
+            }
         }
     };
-    crash_log_stage("已加载 ui-font.otf（界面字体）");
+    crash_log_stage("已加载 cmdysj.ttf（界面字体，与 WebView 页统一）");
     let custom_font = std::fs::read(format!("{dir}/font.ttf"))
         .ok()
         .and_then(|it| FontArc::try_from_vec(it).ok());
@@ -412,12 +450,37 @@ async fn the_main() -> Result<()> {
     let mut painter = TextPainter::new(font.clone(), has_custom_font.then(|| builtin_ui_font.clone()));
     crash_log_stage("字体初始化完成，准备建 MainScene");
 
+    // —— 离线渲染模式（`--render <谱面目录> <输出.mp4>`）——
+    // 不进正常游戏流程：手动时间轴逐帧渲染谱面，管道喂 ffmpeg 出 mp4。
+    // 这里放在字体初始化之后，因为文字绘制要用上面那套字体。
+    match record::parse_args(std::env::args()) {
+        Ok(Some(opts)) => {
+            crash_log_stage("进入离线渲染模式");
+            let result = record::run(opts, font.clone()).await;
+            match &result {
+                Ok(()) => crash_log_stage("离线渲染完成"),
+                Err(err) => {
+                    crash_log_stage(&format!("离线渲染失败: {err:?}"));
+                    error!(?err, "render failed");
+                }
+            }
+            return result;
+        }
+        Ok(None) => {}
+        Err(err) => {
+            // 参数写错就直接报错退出，别默默进游戏
+            error!(?err, "bad render args");
+            crash_log_stage(&format!("渲染参数错误: {err}"));
+            return Err(err);
+        }
+    }
+
     // BOLD_FONT 的兜底也始终用内置界面字体，保证中文标题不受自定义字体影响
     let mut main = Main::new(Box::new(MainScene::new(builtin_ui_font).await?), TimeManager::default(), None).await?;
     crash_log_stage("MainScene 就绪，进入主循环");
 
-    // 创建 WebView 宿主（Windows + `webui` feature 时嵌入 Phirc Mod++ 的
-    // 登录 / 开始 / 曲库界面；默认用 StubHost，界面仍走原有 Rust UI）。
+    // 创建 WebView 宿主（Windows + `webui` feature 时，开始界面就是
+    // `kaichang/index.html`；失败会自动回退到 macroquad 原生 UI）。
     webui::init_host();
 
     let tm = TimeManager::default();
@@ -468,6 +531,29 @@ async fn the_main() -> Result<()> {
         if let Err(err) = res {
             error!("uncaught error: {err:?}");
             show_error(err);
+        }
+        // 曲库页「渲染」按钮：接管渲染循环（阻塞几分钟，窗口上画进度条，不进视频）
+        // 离线渲染：单条请求优先，其次批量队列；队列没跑完就一直占着渲染
+        let queue_item = record::pop_queue();
+        if let Some(opts) = record::take_pending_render().or_else(|| queue_item.as_ref().map(|it| it.opts.clone())) {
+            let label = queue_item.as_ref().map(|it| it.label.clone()).unwrap_or_else(|| opts.out.clone());
+            info!("render: 收到渲染请求（{label}），让位给离线渲染");
+            webui::handoff_to_native();
+            let ok = record::run(opts, font.clone()).await.is_ok();
+            if !ok {
+                error!("render failed");
+            }
+            if let Some(item) = queue_item {
+                record::mark_queue_done(&item.label, ok);
+            }
+            // 队列还有 → 继续渲染下一条（不回 WebView）
+            if record::queue_len() == 0 {
+                // 渲染完回曲库（WebView 重新显示）
+                webui::open_library();
+            } else {
+                info!("render: 队列剩 {} 条，继续", record::queue_len());
+            }
+            continue 'app;
         }
         if main.should_exit() {
             break 'app;
@@ -599,6 +685,15 @@ fn crash_log_stage_panic(msg: &str) {
     }
 }
 
+/// 通用诊断输出：同时进 tracing 日志和 phira-crash.log。
+///
+/// 原来是 `webui::diag`，WebView 整套移除后挪到 crate 根，供 IME / 输入框等
+/// 需要「手机上看不到 adb 时也能留痕」的地方使用。
+pub(crate) fn diag(msg: &str) {
+    tracing::info!("[diag] {msg}");
+    crash_log_stage(&format!("[diag] {msg}"));
+}
+
 /// 把启动阶段写进应用私有目录的 phira-crash.log（和 Java 侧 CrashLog、panic hook 同一个文件）。
 ///
 /// 手机上没有 adb 时，这是唯一能看到「原生侧走到哪一步」的办法：
@@ -651,6 +746,17 @@ fn crash_log_dirs() -> Vec<std::path::PathBuf> {
         let documents = NSSearchPathForDirectoriesInDomains(NSSearchPathDirectory::DocumentDirectory, NSSearchPathDomainMask::UserDomainMask, true);
         if let Some(path) = documents.firstObject() {
             dirs.push(std::path::PathBuf::from(path.to_string()));
+        }
+    }
+    // ⚠️ 桌面（Windows / macOS / Linux）：`DATA_PATH` 永远是 `None`（那只有 JNI / ObjC 会设），
+    // 所以上面那个分支在桌面**一条都不成立** → `dirs` 为空 → `diag()` 只能 `eprintln!`，
+    // 而桌面上 stderr 通常没人看（不是从终端启动的话直接丢掉）。
+    // 结果就是「Windows 上一个诊断文件都没有」，排查只能靠猜。这里补上：
+    // 退化成 `dir::root()`（桌面 = `<cwd>/data`），日志落在存档目录里。
+    #[cfg(not(any(target_os = "android", target_os = "ios", target_env = "ohos")))]
+    if dirs.is_empty() {
+        if let Ok(root) = crate::dir::root() {
+            dirs.push(std::path::PathBuf::from(root));
         }
     }
     dirs
@@ -726,6 +832,70 @@ pub extern "C" fn Java_quad_1native_QuadNative_prprActivityOnPause(_env: EnvUnow
 pub extern "C" fn Java_quad_1native_QuadNative_prprActivityOnResume(_env: EnvUnowned, _class: JClass) {
     if let Some(tx) = MESSAGES_TX.lock().unwrap().as_mut() {
         let _ = tx.send(false);
+    }
+    // ⚠️ 前后台切换后系统可能把帧率票收回去（省电/分屏/浮窗都会），恢复时重新申请。
+    // 失败只记日志，不影响游戏继续跑。
+    apply_preferred_refresh_rate();
+}
+
+/// Java `MainActivity.onCreate` 收到 `-e render` intent 时调这里（见 `record.rs`）。
+///
+/// 手机上没法传命令行参数，所以用 adb intent 触发离线渲染：
+///   `adb shell am start -n org.flos.phira.modded/.MainActivity -e render "/sdcard/charts/X|X.mp4"`
+#[cfg(target_os = "android")]
+#[export_name = "Java_org_flos_phira_modded_MainActivity_nativeRenderArg"]
+extern "system" fn android_render_arg(mut env: EnvUnowned, _: JClass, arg: JString) {
+    let Some(s) = read_java_string(&mut env, &arg, "render arg") else { return };
+    tracing::info!("[render] 收到 intent 渲染请求: {s}");
+    *record::ANDROID_RENDER_ARG.lock().unwrap() = Some(s);
+}
+
+// ============ 刷新率（从 Phira-Pro 移植）============
+
+/// 设备实际可达的最大刷新率（Hz）。Java 侧在发现变化时上报（只上报有变化的那个值）。
+#[cfg(target_os = "android")]
+pub static MAX_DEVICE_REFRESH_RATE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub(crate) fn set_refresh_rate(rate: u16) -> anyhow::Result<()> {
+    #[cfg(target_os = "android")]
+    set_android_refresh_rate(rate)?;
+    Ok(())
+}
+
+/// 通过 JNI 调 `MainActivity.setRequestedFrameRate`（Java 侧会校验档位合法性）。
+#[cfg(target_os = "android")]
+pub(crate) fn set_android_refresh_rate(refresh_rate: u16) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use jni::{jni_sig, jni_str, objects::JObject, vm::JavaVM};
+    JavaVM::singleton()
+        .context("Android Java VM is unavailable")?
+        .attach_current_thread(|env| -> jni::errors::Result<()> {
+            let activity = unsafe { JObject::from_raw(env, ndk_context::android_context().context() as _) };
+            env.call_method(activity, jni_str!("setRequestedFrameRate"), jni_sig!("(I)V"), &[i32::from(refresh_rate).into()])?;
+            Ok(())
+        })
+        .map_err(anyhow::Error::from)
+}
+
+/// 按用户配置申请刷新率。DATA 还没加载时用 120（与 Java 侧初始值一致）。
+#[cfg(target_os = "android")]
+#[allow(static_mut_refs)]
+pub(crate) fn apply_preferred_refresh_rate() {
+    // ⚠️ onResume 可能早于数据加载（Java 侧注释里明确说过），这里不能 panic：
+    // 用裸的 DATA 判断有没有，没有就用 Java 侧一致的默认值 120。
+    let rate = unsafe { DATA.as_ref() }.map_or(120, |d| d.config.preferred_refresh_rate);
+    if let Err(err) = set_refresh_rate(rate) {
+        tracing::warn!("申请刷新率 {rate}Hz 失败：{err:#}");
+    }
+}
+
+/// Java 上报设备最大刷新率（含 alternativeRefreshRates）。
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_quad_1native_QuadNative_setMaxRefreshRate(_env: EnvUnowned, _class: JClass, refresh_rate: jni::sys::jfloat) {
+    if refresh_rate.is_finite() && refresh_rate > 0.0 {
+        MAX_DEVICE_REFRESH_RATE.store(refresh_rate.to_bits(), std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -812,38 +982,39 @@ pub extern "C" fn Java_quad_1native_QuadNative_onTilt(_env: EnvUnowned, _class: 
     prpr::scene::set_motion_tilt(x, y);
 }
 
-/* ------------------------- WebView 开始界面（Android） ------------------------- */
-
-/// JS → Rust 的一条 IPC 消息（由 `WebUIView.Bridge.postMessage` 转发过来）。
+/// Android 输入法一次删除 N 个字符（`InputConnection.deleteSurroundingText` 的 beforeLength）。
 ///
-/// 处理完由 `webui_android::on_ipc` 把回包 eval 回页面。
-#[cfg(all(target_os = "android", feature = "webui"))]
+/// 走 [`crate::ime`] 的**计数通道**，而不是在 Java 侧连发 N 次 `surfaceOnKeyDown(KEYCODE_DEL)`
+/// —— 那 N 个事件会在同一帧入队，而 macroquad 的 `keys_pressed` 是 `HashSet`，
+/// 同键多次按下会坍缩成一次，结果只删掉 1 个字符（原因详见 `ime::push_backspaces`）。
+#[cfg(target_os = "android")]
 #[no_mangle]
-pub extern "C" fn Java_quad_1native_QuadNative_webuiIpc(mut env: EnvUnowned, _class: JClass, json: JString) {
-    if let Some(json) = read_java_string(&mut env, &json, "webuiIpc") {
-        crate::webui_android::on_ipc(json);
-    }
+pub extern "C" fn Java_quad_1native_QuadNative_imeBackspace(_env: EnvUnowned, _class: JClass, n: jni::sys::jint) {
+    crate::ime::push_backspaces(n.max(0) as usize);
 }
 
-/// Java 侧查询 WebView 是否已经建好。
-#[cfg(all(target_os = "android", feature = "webui"))]
-#[no_mangle]
-pub extern "C" fn Java_quad_1native_QuadNative_webuiReady(_env: EnvUnowned, _class: JClass) -> jni::sys::jboolean {
-    if crate::webui_android::is_ready() {
-        jni::sys::JNI_TRUE
-    } else {
-        jni::sys::JNI_FALSE
-    }
-}
-
-/// Java 侧确认「WebView 已建好且首页加载完成」。
+/// Android 输入法提交一个字符（`InputConnection.commitText` 的 UTF-32 码点）。
 ///
-/// 这是**唯一**允许把界面交给 WebView 的时机 —— 提前交棒会黑屏（见该函数注释）。
-#[cfg(all(target_os = "android", feature = "webui"))]
+/// 走 [`crate::ime`] 的 `IME_BUFFER` 互斥锁通道，而不是 macroquad 的 `chars_pressed`
+/// 裸队列（`surfaceOnCharacter` 那条路）—— 后者在 IME 线程 push / 渲染线程 pop 之间无同步，
+/// 是「移动端输入框有时把整个软件卡死」的根因。详见 `ime::push_char`。
+#[cfg(target_os = "android")]
 #[no_mangle]
-pub extern "C" fn Java_quad_1native_QuadNative_webuiOnReady(_env: EnvUnowned, _class: JClass) {
-    crate::webui_android::on_ready();
+pub extern "C" fn Java_quad_1native_QuadNative_imeChar(_env: EnvUnowned, _class: JClass, cp: jni::sys::jint) {
+    crate::ime::push_char(cp.max(0) as u32);
 }
+
+/// Android 输入法「完成 / 确定」（`InputConnection.performEditorAction`）。
+///
+/// 走 [`crate::ime`] 的 `IME_BUFFER` 互斥锁通道，与 `imeChar` / `imeBackspace` 同一条
+/// 安全路径。详见 `ime::push_confirm`。
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "C" fn Java_quad_1native_QuadNative_imeConfirm(_env: EnvUnowned, _class: JClass) {
+    crate::ime::push_confirm();
+}
+
+/* ------------------------- HYKB 凭据 ------------------------- */
 
 /// Credentials obtained from the native HYKB (好游快爆) login SDK.
 pub struct HykbCredential {

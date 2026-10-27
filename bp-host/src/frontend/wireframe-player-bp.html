@@ -1,0 +1,145 @@
+<!doctype html>
+<!--
+  wireframe-player-bp.html —— 参赛者 BP 视图线框（handoff 任务#7 · 移动竖屏优先）
+  布局：顶部对手信息+干扰标记；中上当前回合卡（轮到我+倒计时环）；
+        中部曲池网格（被遮蔽=毛玻璃/问号占位）；底部固定操作区（确认 + 干扰入口 + 表情栏）。
+  底线（handoff 第 6 节）：44px 热区 / touch-action / 100dvh / env(safe-area-inset-bottom) /
+        确认走 Bottom Sheet（≤40% 屏高 + 二次确认）/ BP 进行中禁止模态框（提示用 toast）。
+  视觉值全部来自 design-tokens.css。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>bp-host 线框 · 参赛者 BP 视图</title>
+<link rel="stylesheet" href="./design-tokens.css">
+<link rel="stylesheet" href="./wireframe.css">
+<style>
+  /* 仅布局几何（全部令牌刻度） */
+  .player-shell {
+    width: min(430px, 100%);
+    margin: 0 auto;
+    min-height: var(--dvh);
+    display: grid;
+    grid-template-rows: auto auto 1fr auto;  /* 顶栏 / 回合卡 / 曲池 / 底部操作 */
+  }
+  .push-note { text-align: center; }
+</style>
+</head>
+<body>
+<div class="player-shell">
+  <!-- 顶部：对手信息 + 干扰标记 -->
+  <header class="app-top">
+    <span class="badge" A-side>A 哥</span>
+    <span class="badge" sem="interference">● 你的干扰点：3</span>
+    <span style="flex: 1"></span>
+    <span class="badge" role="spectator" title="退出房间">131400 · 观战 2</span>
+  </header>
+
+  <!-- 中上：当前回合卡（第一视觉权重） -->
+  <article class="turn-card" style="margin: var(--sp-3) var(--sp-4);" actor="A" sem="pick">
+    <div class="fx-tag">−8s</div>
+    <div style="display: flex; align-items: center; gap: var(--sp-3)">
+      <div class="ring" tone="warn" style="--ring-pct: 34; --ring-tone: var(--danger-timeout);">
+        <div class="ring-label">
+          <div class="countdown" tone="warn" id="cn">7<span class="countdown-unit">s</span></div>
+          <div class="countdown-unit">Pick</div>
+        </div>
+      </div>
+      <div style="display: grid; gap: var(--sp-2); flex: 1">
+        <h2 class="card-title">轮到你了</h2>
+        <p class="card-subtitle">第 2 步 / 共 3 步 · Pick · 双方各选一张</p>
+        <div style="display: flex; gap: var(--sp-2); flex-wrap: wrap">
+          <span class="badge" sem="pick">你的回合</span>
+          <span class="badge">倒计时以主机校准</span>
+          <span class="badge" sem="timeout">最后 10s 琥珀</span>
+        </div>
+      </div>
+    </div>
+  </article>
+
+  <!-- 中部：曲池网格（遮蔽=毛玻璃/问号占位；仅渲染层，主机态不变） -->
+  <main style="padding: var(--sp-4); overflow: auto;">
+    <div class="pool-grid" style="grid-template-columns: 1fr 1fr;">
+      <button class="chart-cell" masked>
+        <span class="chart-mask-hint">?</span>遮蔽占位</button>
+      <button class="chart-cell"><strong>Anox</strong><span>s-don</span></button>
+      <button class="chart-cell" status="picked" picked-by="A"><strong>Lyrith</strong><span>侑那</span></button>
+      <button class="chart-cell"><strong>Re end of a dream</strong><span>ak+q2</span></button>
+      <button class="chart-cell" status="forcedBanCandidate"><strong>Force</strong><span>seventh Hera</span></button>
+      <button class="chart-cell"><strong>AltAngel</strong><span>ccoja</span></button>
+    </div>
+  </main>
+
+  <!-- 底部固定操作区：确认 + 干扰入口 + 表情快捷栏 -->
+  <div class="ops-dock" style="position: static;">
+    <button class="btn" variant="primary" side="A" id="open-sheet">确认选择</button>
+    <button class="btn" id="open-interference">干扰（3）</button>
+    <div style="grid-column: 1 / -1; display: flex; gap: var(--sp-2); overflow-x: auto;">
+      <button class="btn" variant="ghost">👍</button>
+      <button class="btn" variant="ghost">😂</button>
+      <button class="btn" variant="ghost">👏</button>
+      <button class="btn" variant="ghost">GG</button>
+      <button class="btn" variant="ghost">🛡 反制（扣 1 点）</button>
+    </div>
+  </div>
+</div>
+
+<!-- Bottom Sheet（≤40% 屏高；BP 进行中禁模态，一切用 Sheet + toast） -->
+<div class="sheet-scrim" id="scrim"></div>
+<aside class="sheet" id="sheet" aria-label="确认面板">
+  <div class="sheet-handle"></div>
+  <h3 class="card-title">确认 Pick：《Anox》？</h3>
+  <p class="card-subtitle">操作确认后不可撤回（裁定回退仅主办方）；二次确认防误触。</p>
+  <div style="display: flex; gap: var(--sp-2); margin-top: var(--sp-3)">
+    <button class="btn" id="confirm-first">确认</button>
+    <button class="btn" variant="ghost" id="cancel">再想想</button>
+  </div>
+  <div id="confirm-2" style="display: none; margin-top: var(--sp-3); border-top: 1px solid var(--border-subtle); padding-top: var(--sp-3);">
+    <h4 class="card-title" style="font-size: var(--fz-md)">二次确认</h4>
+    <div style="display: flex; gap: var(--sp-2); margin-top: var(--sp-2)">
+      <button class="btn" variant="primary" side="A" id="confirm-final">发送到主机</button>
+      <button class="btn" variant="ghost" id="cancel-2">放弃</button>
+    </div>
+  </div>
+</aside>
+
+<div class="toast" id="toast" style="display: none;">操作已受理，等待主机确认（数据以主机为准）</div>
+
+<script>
+  // —— 仅交互演示骨架：真实上线后由 net.ts 事件驱动，本文件不做状态推进 ——
+  const sheet = document.getElementById('sheet');
+  const scrim = document.getElementById('scrim');
+  const toast = document.getElementById('toast');
+  const openSheet = (on) => { sheet.setAttribute('open', ''); scrim.setAttribute('open', ''); };
+  const closeSheet = () => { sheet.removeAttribute('open'); scrim.removeAttribute('open'); };
+  document.getElementById('open-sheet').onclick = openSheet;
+  document.getElementById('open-interference').onclick = () => {
+    toast.textContent = '干扰入口:选类型 → 选目标 → 付点数（均由主机校验并执行）';
+    toast.style.display = 'block';
+    setTimeout(() => (toast.style.display = 'none'), 2000);
+  };
+  document.getElementById('cancel').onclick = closeSheet;
+  document.getElementById('cancel-2').onclick = closeSheet;
+  document.getElementById('confirm-first').onclick = () => {
+    document.getElementById('confirm-2').style.display = 'block';
+  };
+  document.getElementById('confirm-final').onclick = () => {
+    closeSheet();
+    toast.textContent = '操作已发出（未受确切确认前本地状态不推进）';
+    toast.style.display = 'block';
+    setTimeout(() => (toast.style.display = 'none'), 2200);
+  };
+  scrim.onclick = closeSheet;
+
+  // 倒计时本地平滑渲染演示：主机为准的 deadline 由 TimerSync 校准（此处假数据）
+  let left = 7;
+  setInterval(() => {
+    left = Math.max(0, left - 1);
+    const cn = document.getElementById('cn');
+    cn.innerHTML = left + '<span class="countdown-unit">s</span>';
+    cn.setAttribute('tone', left <= 3 ? 'hot' : 'warn');
+  }, 1000);
+</script>
+</body>
+</html>

@@ -24,7 +24,8 @@ mod shader;
 pub(crate) use audio::BlockAudio;
 pub(crate) use shader::reset_block_effects;
 /// 噪区遮罩分辨率（设置里的「噪区精细度」滑块）。
-pub use shader::{mask_divisor, set_mask_divisor, MAX_MASK_DIVISOR, MIN_MASK_DIVISOR};
-pub use shader::{draw_disabled_zones, draw_zones, draw_zones_with_touches, Zone};
+pub use shader::{low_performance, mask_divisor, set_low_performance, set_mask_divisor, MAX_MASK_DIVISOR, MIN_MASK_DIVISOR};
+pub use shader::{draw_disabled_zones, draw_zones, draw_zones_with_touches, BlockRenderer, Zone};
+pub(crate) use shader::skin_mask;
 /// 噪区着色器的编译错误 / 强制初始化（供「设置 → 日志」页显示诊断）。
 pub use shader::{force_init as force_block_shader_init, shader_error as block_shader_error};

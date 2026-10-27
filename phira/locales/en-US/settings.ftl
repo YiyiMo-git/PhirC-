@@ -144,6 +144,10 @@ item-judge-chart-sub = Draw a judgement timing distribution chart (early ← →
 item-health-max = Health Maximum
 item-health-max-sub = Maximum health of health mode (10 ~ 10000, 100 by default; you start at 70%)
 # 噪区精细度滑块（prpr blockarea 的 MASK_DIVISOR）
+item-block-low-perf = Noise zone low performance
+item-block-low-perf-sub = Coarser mask (divisor 12) and no touch highlight; noise zone cost drops to about 1/4. Only enable if noise zones stutter
+item-note-flow-speed = Note flow speed
+item-note-flow-speed-sub = Global visual flow multiplier (scales how far notes fall). Visual only: does not change chart time, audio playback or judgement windows; a changed value is excluded from ranking
 item-block-mask-divisor = Noise zone detail
 item-block-mask-divisor-sub = Mask resolution divisor (2-8). Smaller = finer cells and sharper edges, but per-pixel cost grows with the square; 8 is the official native resolution
 

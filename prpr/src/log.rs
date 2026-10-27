@@ -80,12 +80,25 @@ where
             msg += &message;
         }
 
+        // 每个分支都包成块：宏调用带分号直接写在 match 分支里会被判成
+        // 「expression position 里的尾随分号」（`semicolon_in_expressions_from_macros`），
+        // 未来会变成硬错误。放进块里当语句就没这个问题。
         match *meta.level() {
-            Level::TRACE => trace!("{}", msg),
-            Level::DEBUG => debug!("{}", msg),
-            Level::INFO => info!("{}", msg),
-            Level::WARN => warn!("{}", msg),
-            Level::ERROR => error!("{}", msg),
+            Level::TRACE => {
+                trace!("{}", msg);
+            }
+            Level::DEBUG => {
+                debug!("{}", msg);
+            }
+            Level::INFO => {
+                info!("{}", msg);
+            }
+            Level::WARN => {
+                warn!("{}", msg);
+            }
+            Level::ERROR => {
+                error!("{}", msg);
+            }
         }
     }
 }

@@ -45,3 +45,10 @@ multi-select-all = Select All
 multi-select-invert = Invert Selection
 
 fav-created = Favorites created
+
+chart-count = { $count } charts
+search-hint = Search title or artist…
+order-default = Default
+order-name = Title
+order-difficulty = Difficulty
+order-score = Score

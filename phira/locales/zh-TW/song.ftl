@@ -28,6 +28,7 @@ edit-saving = 儲存中…
 edit-load-file-failed = 載入外部檔案失敗
 edit-save-failed = 儲存失敗
 edit-saved = 儲存成功
+replay-finished = 回放播放結束
 edit-preview-invalid = 預覽時間超出範圍
 edit-tags = 編輯標籤
 edit-downloaded = 您無法編輯下載的譜面！

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>bp-host · 对局现场</title>
+  <link rel="stylesheet" href="./design-tokens.css" />
+  <link rel="stylesheet" href="./wireframe.css" />
+  <link rel="stylesheet" href="./app.css" />
+</head>
+
+<body class="app-plain app-shell">
+  <!-- 三角色共用现场页：控制台 / 选手 / 观众（见 app-ui.ts 的角色分流） -->
+  <main class="app-shell" id="stage"></main>
+
+  <script type="module">
+    // 打包产物：tools/build-frontend.cjs（app-ui.ts + ./net + ./app-core → app-bp.js）
+    import { boot, renderAll } from "./dist/app-bp.js";
+    // renderAll 供调试用（store 未挂 onState，渲染统一由事件流入 handleFlowEvent 带动）
+    window.__bpRenderAll = renderAll;
+    boot();
+  </script>
+</body>
+
+</html>

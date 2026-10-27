@@ -1,5 +1,9 @@
 inner.rs
 
+# 敏感代码（凭据/登录/HYKB + 改谱 note_map）：本 mod 的实现细节，不随公开仓库分发。
+# 本地开发必须保留此目录；推公仓时整目录自然排除。若公仓也需编译，需另建 stub。
+/sensitive
+
 /target
 /assets/font.ttf
 # ⚠️ 但 `/assets/font.ttf` 已被 `git add -f` 强制入库（见下方说明），

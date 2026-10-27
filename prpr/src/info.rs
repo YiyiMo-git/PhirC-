@@ -49,6 +49,9 @@ pub struct ChartInfo {
     pub force_aspect_ratio: bool,
     pub use_rpe_170_speed: Option<bool>,
     pub use_attach_ui_fix: Option<bool>,
+    /// 是否启用 RPEN 扩展特性（None = 未指定，按导入时探测到的值）。
+    /// 置 false 则回退旧版行为（忽略曲线轨迹 / 分层噪域 / shader 事件 / globalEvents…）。
+    pub use_rpen: Option<bool>,
 
     pub created: Option<DateTime<Utc>>,
     pub updated: Option<DateTime<Utc>>,
@@ -90,6 +93,7 @@ impl Default for ChartInfo {
             force_aspect_ratio: false,
             use_rpe_170_speed: None,
             use_attach_ui_fix: None,
+            use_rpen: None,
 
             created: None,
             updated: None,

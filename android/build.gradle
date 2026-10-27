@@ -1,3 +1,5 @@
 plugins {
-    id "com.android.application" version "8.5.2" apply false
+    // 8.4.2 兼容本地 Gradle 8.7（AGP 8.5 需要 Gradle 8.9+，会直接报版本过低）。
+    // 若要回到 8.5.x，请把 Gradle 升到 8.9+（并同步 CI 的 gradle-version）。
+    id "com.android.application" version "8.4.2" apply false
 }

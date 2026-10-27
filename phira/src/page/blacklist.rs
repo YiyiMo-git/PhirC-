@@ -169,11 +169,18 @@ impl Page for BlacklistPage {
                 }
 
                 let remove_label = tl!("remove").into_owned();
+                // ---- iOS 分组列表（inset grouped）----
+                // 整组**共用一个圆角容器**，行与行紧贴、靠内缩发丝线分隔。
+                // 原来是「每行一张独立圆角卡 + 8 单位间隙」，那是卡片语言。
+                // ⚠️ 容器必须先铺：这是即时模式，晚画会盖住已经画好的行内容。
+                let group_radius = 0.014;
+                crate::newui::group_plate(ui, &th, Rect::new(0., y, w, row_h * n as f32), group_radius);
                 for (i, entry) in self.entries.iter().enumerate() {
                     let r = Rect::new(0., y, w, row_h);
-                    // 行卡 = 磨砂玻璃（悬停提亮 + 外发光），选中态行统一圆角与 1px 浅边
                     let hp = if ui.rect_to_global(r).contains(mouse) { 1. } else { 0. };
-                    crate::newui::glass_card(ui, r, 0.014, &th, hp);
+                    // 行自己不填底板（底板来自 `group_plate`），只叠悬停 + 发丝线；
+                    // 分隔线内缩到文字左缘（`#id` 从 0.026 开始），对齐 iOS 的做法。
+                    crate::newui::group_row(ui, &th, r, hp, i == 0, i + 1 == n, group_radius, 0.026, Color::new(0., 0., 0., 0.));
                     // 左侧强调条：跟主题的强调色（原来是一条死黑的 ink 竖条）
                     crate::newui::accent_bar(
                         ui,
@@ -201,7 +208,7 @@ impl Page for BlacklistPage {
                     );
                     let br = Rect::new(r.right() - 0.235, cy - 0.032, 0.22, 0.064);
                     self.row_btns[i].render_text_color(ui, br, t, remove_label.as_str(), 0.4, false, RED);
-                    y += row_h + 0.008;
+                    y += row_h;
                 }
                 (w, y + GAP)
             });

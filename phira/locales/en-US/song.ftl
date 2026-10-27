@@ -28,6 +28,7 @@ edit-saving = Saving...
 edit-load-file-failed = Failed to import external file.
 edit-save-failed = Save failed.
 edit-saved = Saved.
+replay-finished = Replay finished
 edit-preview-invalid = Preview time out of bounds.
 edit-tags = Edit Tags
 edit-downloaded = Online charts can't be edited.

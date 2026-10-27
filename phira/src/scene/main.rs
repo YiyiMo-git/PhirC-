@@ -13,7 +13,7 @@ use anyhow::{anyhow, Context, Result};
 use macroquad::prelude::*;
 use prpr::{
     core::ResPackInfo,
-    ext::{unzip_into, RectExt, SafeTexture},
+    ext::{open_url, unzip_into, RectExt, SafeTexture},
     info::ChartInfo,
     parse::ParseWarnings,
     scene::{return_file, show_error, show_message, take_file, NextScene, Scene},
@@ -42,6 +42,17 @@ use uuid::Uuid;
 const LOW_PASS: f32 = 0.95;
 
 pub static BGM_VOLUME_UPDATED: AtomicBool = AtomicBool::new(false);
+
+/// 正等用户走完原生「服务条款」流程（走完把用户送回曲库页）。
+///
+/// 为什么是状态机而不是一次性调用：`check_read_tos_and_policy` 在条款文本还没拉到
+/// 时**只启动一次后台拉取、不弹窗**；只调一次的话弹窗永远不会出现，用户就会一直
+/// 卡在 `must-accept-tos`。所以要每帧重试到「拉到条款 → 弹窗 → 用户接受」。
+static TOS_PENDING: AtomicBool = AtomicBool::new(false);
+/// 原生条款对话框是否已经弹出过（避免反复弹）。
+static TOS_DIALOG_SHOWN: AtomicBool = AtomicBool::new(false);
+/// 拉条款期间的重试计数（每 30 帧推一次，别每帧都调）。
+static TOS_RETRY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 thread_local! {
     static RESPACK_ITEM: RefCell<Option<ResPackItem>> = RefCell::default();
@@ -90,9 +101,6 @@ pub struct MainScene {
     batch_import_rx: Option<mpsc::Receiver<ImportChart>>,
     batch_imported_charts: Vec<ImportChart>,
     batch_import_total: usize,
-
-    /// WebView 界面请求启动谱面时，在 `next_scene` 里一次性返回的 overlay。
-    webui_next_scene: Option<NextScene>,
 }
 
 enum ImportChart {
@@ -195,8 +203,6 @@ impl MainScene {
             batch_import_rx: None,
             batch_imported_charts: Vec::new(),
             batch_import_total: 0,
-
-            webui_next_scene: None,
         })
     }
 
@@ -208,11 +214,8 @@ impl MainScene {
         }
         // 照 phira-0.8.2：走 `fader.back()` 的过渡动画。
         //
-        // 「目标是开始界面」这一特殊情形不在这里硬切 —— 垫背的根页（`HomePage`）由
-        // `render` 里的守卫跳过，所以过渡期间露出的是 Rust 自己的 TriGrid 网格底，
-        // 而开始界面（WebView / `ui/index.html`）用的正是同一套 TriGrid 背景，
-        // 两者视觉是连贯的；外壳另在 `render` 里跟着淡出。
-        // WebView 由 `update()` 在页面栈回到 1 页时铺回来。
+        // 回到根页时，过渡期间露出的是 Rust 自己的 TriGrid 网格底，与开始页背景
+        // 是同一套，视觉连贯。
         self.state.fader.back(self.state.t);
     }
 
@@ -230,20 +233,6 @@ impl MainScene {
         self.state.fader.reset();
         if let Err(err) = self.pages[0].enter(&mut self.state) {
             warn!("failed to re-enter root page: {err:?}");
-        }
-        // 【关键】回到根页 = 该把 WebView 铺回来了，这里**立刻**置可见。
-        //
-        // `update()` 里那段「回到根页面就重新显示 WebView」是每帧末尾才跑的；
-        // 而本函数从 `touch()`（早于同帧的 `update`）里调用，之间隔着好几帧的
-        // 淡入淡出 —— 那几帧 `is_webui_visible()` 还是 false，`render()` 就照常画
-        // 原生首页，于是观感是「切换回开始界面前闪过几帧原生界面」。
-        // 在这里补上，让可见性在改变的**同一帧**就生效。
-        // （`webui_next_scene` 有值时不抢：那是要开谱、WebView 该让位。）
-        if self.webui_next_scene.is_none()
-            && crate::webui::webui_host_real()
-            && !crate::webui::is_webui_visible()
-        {
-            crate::webui::set_webui_visible(true);
         }
     }
 
@@ -269,7 +258,9 @@ impl MainScene {
                 let fs = !get_data().config.fullscreen_mode;
                 get_data_mut().config.fullscreen_mode = fs;
                 let _ = save_data();
-                macroquad::window::set_fullscreen(fs);
+                // 走自管版本：miniquad 的全屏 style 会丢掉 WS_CLIPCHILDREN，
+                // 导致父窗口的 blit 盖住 WebView 子窗口
+                crate::webui::set_fullscreen(fs);
             }
             ShellAction::Quit => {
                 self.quit = true;
@@ -284,16 +275,46 @@ impl MainScene {
         self.state.fader.reset();
         crate::hud::set_cur_page(p);
         let icons = |page| crate::page::global_icons().with_context(|| format!("UI icons are not ready ({page})"));
+        // 目标页是否交给 WebView 呈现（这时没有压原生页，下面的 enter() 要跳过）
+        let mut webview_page = false;
         match p {
-            PageId::Home => {}
+            PageId::Home => {
+                // 原生 Home 页已「删掉」：WebView 可用时回开始页，不再露出那个面板。
+                if crate::webui::host_available() {
+                    crate::webui::show_start_page();
+                }
+            }
             PageId::Library => {
-                let page = crate::page::LibraryPage::new(icons("library")?, self.state.icons.clone())?;
-                self.pages.push(Box::new(page));
+                // 曲库现在由 WebView 加载 library.html 呈现；
+                // WebView2 不可用时回退到原生 Rust 曲库页。
+                //
+                // ⚠️ 例外：带「要展开的浮层」（B0 / RKS / 课题）时必须走**原生**页 ——
+                // 这三个浮层只有原生实现，WebView 版曲库页没有它们的 UI。
+                // 之前无脑走 `open_library()` 会把 WebView 又显示回来，
+                // `LibraryPage::enter` 永远不会跑 → 浮层请求烂在 `PENDING_OVERLAY` 里，
+                // 用户看到的就是「B0 / RKS / 课题点了没反应」。
+                let has_overlay = crate::page::library::PENDING_OVERLAY
+                    .lock()
+                    .map(|g| g.is_some())
+                    .unwrap_or(false);
+                if crate::webui::host_available() && !has_overlay {
+                    crate::webui::open_library();
+                    webview_page = true;
+                } else {
+                    let page = crate::page::LibraryPage::new(icons("library")?, self.state.icons.clone())?;
+                    self.pages.push(Box::new(page));
+                }
             }
             PageId::Settings => {
-                let icons = icons("settings")?;
-                let page = crate::page::SettingsPage::new(icons.icon.clone(), icons.lang.clone());
-                self.pages.push(Box::new(page));
+                // 设置界面现在由 WebView 加载 Setting.html 呈现；
+                // WebView2 不可用时 `open_settings` 无操作，这里回退到原生 Rust 设置页。
+                if crate::webui::host_available() {
+                    crate::webui::open_settings();
+                } else {
+                    let icons = icons("settings")?;
+                    let page = crate::page::SettingsPage::new(icons.icon.clone(), icons.lang.clone());
+                    self.pages.push(Box::new(page));
+                }
             }
             PageId::Favorites => {
                 let page = crate::page::FavoritesPage::new(icons("favorites")?, self.state.icons.clone(), None, None);
@@ -314,9 +335,44 @@ impl MainScene {
                 self.pages.push(Box::new(crate::page::BlacklistPage::new()));
             }
         }
-        if p != PageId::Home {
+        // 只在真的压了原生页时 enter（Home 与交给 WebView 的页都没有新页可 enter）
+        if p != PageId::Home && p != PageId::Settings && !webview_page {
             self.pages.last_mut().unwrap().enter(&mut self.state)?;
         }
+        Ok(())
+    }
+
+    /// 从 WebView 打开「工具覆盖页」（谱面工具箱 / 活动）。
+    ///
+    /// 这两页在原生 Home 面板里是 `NextPage::Overlay`（压在 Home 之上），**不是**
+    /// `PageId` 的一员，所以不能走 [`Self::goto_hud_page`]：这里把 Home 当底座，
+    /// 再把覆盖页压到页面栈上（切页副作用与 `goto_hud_page` 保持一致）。
+    fn open_web_tool(&mut self, tool: crate::webui::WebTool) -> Result<()> {
+        use crate::webui::WebTool;
+
+        self.pages.truncate(1); // 只留 Home 底座
+        self.state.fader.reset();
+        crate::hud::set_cur_page(crate::hud::PageId::Home);
+
+        match tool {
+            WebTool::Toolbox => {
+                self.pages.push(Box::new(crate::page::ChartToolboxPage::new()));
+            }
+            WebTool::Event => {
+                // 活动页要账号数据。原生 Home 面板那里是弹登录框，但从 WebView
+                // 进来时拿不到 HomePage 的登录态，所以给一条提示更稳。
+                if get_data().me.is_none() {
+                    show_message("请先登录后再查看活动").warn();
+                    return Ok(());
+                }
+                let icons = crate::page::global_icons().with_context(|| "UI icons are not ready (event)")?;
+                self.pages.push(Box::new(crate::page::EventPage::new(icons, self.state.icons.clone())));
+            }
+            WebTool::Timing => {
+                self.pages.push(Box::new(crate::page::TimingEditor::new()));
+            }
+        }
+        self.pages.last_mut().unwrap().enter(&mut self.state)?;
         Ok(())
     }
 }
@@ -376,38 +432,6 @@ impl Scene for MainScene {
         // （模态拦截照旧），但触摸**保留在列表里**，引擎层的输入框能读到它。
         if prpr::scene::has_pending_input() {
             return Ok(false);
-        }
-
-        // 【开始页（WebView）可见时，触摸全部由 Rust 侧裁决】
-        //
-        // 背景：iOS 上 WKWebView 的 JS 注入怎么都不生效，5 个按钮点了没反应。
-        // 解决方式见 `crate::webui_hit` —— `ios/webui.m` 把 WKWebView 设成
-        // `userInteractionEnabled = NO`，触摸穿透到下面的游戏视图，这里按矩形命中。
-        //
-        // 注意「**没命中也要吃掉**」：WebView 已经不再拦截任何触摸了，如果这里放行，
-        // 触摸会穿透到 WebView 下面那层**看不见的** Rust 首页 / New UI 外壳
-        // （`render` 在 WebView 可见时是整帧跳过的），点屏幕顶部就能盲切活动栏。
-        // 现在这样正好还原「WebView 铺在上面时它吃掉一切触摸」的旧语义，
-        // 只是把落在 5 个按钮上的那几次翻译成原生动作。
-        //
-        // `ENABLED` 只在 iOS 为 true（原因写在它的文档注释里：Windows 会双击、
-        // Android 触摸根本到不了游戏视图），非 iOS 平台这个分支永不进入 ——
-        // 但仍会被编译，所以 `cargo check` 就能验证 iOS 那条路。
-        if crate::webui_hit::ENABLED && crate::webui::is_webui_visible() {
-            // 只在按下的那一刻判定一次（`TouchPhase::Started` 每个手指只产生一次），
-            // 不需要像 `RectButton` 那样跟踪 id / 抬手位置：菜单按钮按下即生效，
-            // 手指划走取消反而更让人困惑。
-            if matches!(touch.phase, TouchPhase::Started) {
-                // 只有「开始页」这一个界面才有这 5 个按钮。`current_page()` 由 JS 的
-                // `ui_page_changed` 上报；开始页 `ui/index.html` 没有引 bridge.js，
-                // 永远不上报，所以实际取值是空串（`"home"` 也一并放行，以防将来接上）。
-                if matches!(crate::webui::current_page().as_str(), "" | "home") {
-                    let pos = (touch.position.x, touch.position.y);
-                    let screen = (screen_width(), screen_height());
-                    crate::webui_hit::handle_touch(pos, screen);
-                }
-            }
-            return Ok(true);
         }
 
         if self.state.fader.transiting() {
@@ -477,6 +501,20 @@ impl Scene for MainScene {
             // 没被拦下才 `pop()` —— `pop()` 走 `fader.back()`，于是返回也有过渡动画，
             // 不再是原来 `reset_to_root()` 那种「一键弹回开始界面 + 硬切」。
             if !self.pages.last_mut().unwrap().on_back_pressed(s) {
+                // 原生页面栈要回根了 —— 但原生 Home 页已经「删掉」，所以改回 WebView：
+                //  • 这一页是 WebView 推过来的（收藏夹点 PLAY / 工具面板）→ 回 WebView 原来那页
+                //  • 其它情况（原生设置等）→ 回开始页
+                if self.pages.len() == 2 && crate::webui::host_available() {
+                    self.pages.truncate(1);
+                    s.fader.reset();
+                    crate::hud::set_cur_page(crate::hud::PageId::Home);
+                    if crate::webui::take_webview_handoff() {
+                        crate::webui::show();
+                    } else {
+                        crate::webui::show_start_page();
+                    }
+                    return Ok(true);
+                }
                 if self.pages.len() == 2 {
                     if let Some(bgm) = &mut self.bgm {
                         bgm.set_low_pass(0.)?;
@@ -496,6 +534,31 @@ impl Scene for MainScene {
         // HUD 编辑器请求切页：重建页面栈（根页面保留、不重建，因此不需要异步）。
         if let Some(p) = crate::hud::take_goto() {
             self.goto_hud_page(p)?;
+        }
+        // 「为浮层（B0 / RKS / 课题）而来」的原生曲库页：浮层关了 → 弹回 WebView 曲库。
+        // 与左上角返回键完全同一条路（页面自己出不去，只能在这截断页面栈 + 显示 WebView）。
+        if crate::page::library::take_overlay_return() && self.pages.len() >= 2 {
+            self.pages.truncate(1);
+            self.state.fader.reset();
+            crate::hud::set_cur_page(crate::hud::PageId::Home);
+            if crate::webui::take_webview_handoff() {
+                crate::webui::show();
+            } else {
+                crate::webui::show_start_page();
+            }
+        }
+        // 原生 Home 页已「删掉」：只要原生页面栈回到根、而 WebView 又被藏着，
+        // 就说明马上要露出那个不要的原生 Home 了 → 立刻把 WebView 顶回来。
+        // （打完一局回 MainScene、或从原生页用非返回箭头的方式退到根，都靠这条兜住。）
+        if self.pages.len() == 1
+            && crate::webui::host_available()
+            && !crate::webui::webview_visible()
+        {
+            if crate::webui::take_webview_handoff() {
+                crate::webui::show();
+            } else {
+                crate::webui::show_start_page();
+            }
         }
         UI_AUDIO.with(|it| it.borrow_mut().recover_if_needed())?;
         // 游戏内暂停面板调过判定偏移：写回配置并保存
@@ -519,7 +582,6 @@ impl Scene for MainScene {
                 }
             })?;
         }
-        let rank_icons = self.state.icons.clone();
         let s = &mut self.state;
         s.update(tm);
         if s.fader.transiting() {
@@ -558,37 +620,7 @@ impl Scene for MainScene {
                 bgm.set_amplifier(get_data().config.volume_bgm)?;
             }
         }
-        // WebView 界面（登录 / 开始 / 曲库）触发的待办：
-        // 1) 启动谱面 → 在 next_scene 里一次性返回 SongScene overlay（复用原有游玩入口）
-        // 2) 打开原生页面（设置 / 活动 / 资源包）→ 推到页面栈
-        // 3) 开始页「开始游玩」→ 原生曲库（需要 state.icons，所以在这里单独构造）
-        if crate::webui::take_pending_library() {
-            let icons = crate::page::global_icons().with_context(|| "UI icons are not ready (library)")?;
-            let st = &mut self.state;
-            let mut sub = crate::page::LibraryPage::new(icons, st.icons.clone())?;
-            sub.enter(st)?;
-            self.pages.push(Box::new(sub));
-            st.fader.sub(st.t);
-        }
-        if let Some(scene) = crate::webui::take_pending_scene(rank_icons.clone()) {
-            self.webui_next_scene = Some(scene);
-        }
-        if let Some(mut sub) = crate::webui::take_pending_open_page(rank_icons) {
-            // 重新借用 self.state：上方 `s` 的借用已在第 473 行结束，
-            // 这里开一条新借用，避免与上面 match 分支里的 self.pop() 冲突。
-            let st = &mut self.state;
-            sub.enter(st)?;
-            self.pages.push(sub);
-            st.fader.sub(st.t);
-        }
-        // 回到根页面（开始界面）时，重新把 WebView 铺上来
-        if self.pages.len() == 1
-            && self.webui_next_scene.is_none()
-            && crate::webui::webui_host_real()
-            && !crate::webui::is_webui_visible()
-        {
-            crate::webui::set_webui_visible(true);
-        }
+        // WebView 已移除：所有页面切换都走原生 `NextPage` / `NextScene`。
 
         if let Some(task) = &mut self.import_task {
             if let Some(res) = task.take() {
@@ -624,6 +656,17 @@ impl Scene for MainScene {
                         _ => "_import",
                     };
                     return_file(new_id.to_owned(), file);
+                }
+                "_import" if crate::phic::is_pic_file(std::path::Path::new(&file)) => {
+                    // PhiC 剧情包 `.pic`：完整解析（头 + 目录 + 各分块）并导入为「章节」。
+                    match crate::phic::import_pic(std::path::Path::new(&file)) {
+                        Ok((_id, title, scenes)) => {
+                            show_message(format!("已导入章节《{title}》（{scenes} 个场景）"));
+                        }
+                        Err(err) => {
+                            show_error(err.context(itl!("import-failed")));
+                        }
+                    }
                 }
                 "_import" => {
                     let export_info = (|| -> Result<Option<(ExportInfo, usize)>> {
@@ -723,16 +766,17 @@ impl Scene for MainScene {
                     })();
                     match item {
                         Err(err) => {
+                            // 先把调试串取出来：`err.context(..)` 会 move 掉 `err`。
+                            let detail = format!("{err:?}");
                             show_error(err.context(itl!("import-respack-failed")));
+                            crate::webui::notify_respack_import_error(&detail);
                             if let Some(id) = &dir_id {
                                 dir.remove_dir_all(id)?;
                             }
-                            crate::webui::webui_emit("respacks_changed", serde_json::json!({ "ok": false }));
                         }
                         Ok(item) => {
                             RESPACK_ITEM.with(|it| *it.borrow_mut() = Some(item));
                             show_message(itl!("import-respack-success"));
-                            crate::webui::webui_emit("respacks_changed", serde_json::json!({ "ok": true }));
                         }
                     }
                 }
@@ -880,30 +924,6 @@ impl Scene for MainScene {
     }
 
     fn render(&mut self, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
-        // 从原生页返回开始页时，那一帧的可见性标志有时还停在 false（退出是本帧早先发生的），
-        // 于是 `render` 走原生分支、把 **Rust 原生首页**画了出来 —— WebView 下一帧才跟上，
-        // 观感就是「上一个界面一闪而过」。这里在真正开画之前再判一次：
-        // 已经回到根页面、且没有待播的谱面场景时，立刻把可见性补上，
-        // 直接走下面的 WebView 分支，原生首页一帧都不画。
-        if self.pages.len() == 1
-            && self.webui_next_scene.is_none()
-            && crate::webui::webui_host_real()
-            && !crate::webui::is_webui_visible()
-        {
-            crate::webui::set_webui_visible(true);
-        }
-
-        // WebView 铺在窗口上时整帧都不画（被盖住了），省 GPU。
-        // 只有真的嵌入了原生 WebView 且当前可见才跳过；StubHost 下照常渲染 Rust UI。
-        if crate::webui::is_webui_visible() {
-            // ⚠️ 不能直接 return：`render` 早退就不会清屏，而 WebView 是独立子窗口，
-            // 它没盖到的边缘（底部状态栏 / 左侧活动栏那几条）会**残留上一帧的原生 UI**，
-            // 观感就是「你的页面 + 我做的界面」混在一起。
-            // 所以这里先把整屏填成页面同款深色底，再交还给 WebView。
-            set_camera(&ui.camera());
-            ui.fill_rect(ui.screen_rect(), Color::new(0.051, 0.055, 0.063, 1.));
-            return Ok(());
-        }
         set_camera(&ui.camera());
 
         let m = Metrics::new(ui);
@@ -930,34 +950,16 @@ impl Scene for MainScene {
         // 状态栏附加信息每帧由页面重填（曲库的曲目计数 / 选中项），先清掉上一帧的。
         newui::set_status_extra(None);
 
-        // 【回开始界面】的过渡特判。
-        //
-        // 开始界面由原生 WebView（`ui/index.html`）承载，Rust 侧 `pages[0]`（`HomePage`）
-        // 只是垫背；而 WebView 是独立子窗口、盖在 GL 画布之上，没法把 Rust 的滑出动画叠在它上面。
-        // 所以这一段过渡这样做：
-        //   1. 垫背根页**不画**（见下面的守卫）→ 露出的是 Rust 自己的 TriGrid 网格底；
-        //   2. 开始界面用的是**同一套 TriGrid 背景**，所以「页面滑走 → 网格底 → 开始界面」
-        //      在视觉上是连贯的，不会突兀；
-        //   3. Rust 外壳（标题栏 / 状态栏）跟着淡出 —— 开始界面那边没有 Rust 外壳，
-        //      不淡出的话它会在最后一帧「啪」地消失。
-        // `to_root_p` 是「开始界面（下层页）的入场进度」：0 → 1。
-        let st = s.t;
-        let to_root = s.fader.transiting() && self.pages.len() == 2 && crate::webui::webui_host_real();
-        let to_root_p = if to_root { s.fader.for_sub(|f| f.progress(st)) } else { 0. };
+        // WebView 已移除：开始界面就是 Rust 原生 `HomePage`，是正常的栈底页面，
+        // 不再需要「跳过垫背根页 / 让外壳跟着淡出」那套为独立子窗口做的特判。
 
         // 1. page
         if s.fader.transiting() {
             let pos = self.pages.len() - 2;
-            // 【跳过垫背的根页】过渡时露出的「下层页」如果正是根页（开始界面），**不要画它**：
-            // 开始界面实际由原生 WebView（`ui/index.html`）承载，根页 `HomePage` 只是垫背，
-            // 画出来就是用户反馈的「闪过我之前写的老界面」。
-            // 只有真的嵌了 WebView 才跳过；没嵌入时根页**就是**开始界面，照常画。
-            if !(pos == 0 && crate::webui::webui_host_real()) {
-                let old = s.fader.distance;
-                s.fader.distance *= -0.6;
-                self.pages[pos].render(ui, s)?;
-                s.fader.distance = old;
-            }
+            let old = s.fader.distance;
+            s.fader.distance *= -0.6;
+            self.pages[pos].render(ui, s)?;
+            s.fader.distance = old;
         }
         s.fader.sub = true;
         s.fader.reset();
@@ -972,6 +974,12 @@ impl Scene for MainScene {
 
         // 3. back —— New UI 里放在内容区左上角（活动栏右边），样式是设计稿的方形图标按钮
         if self.pages.len() >= 2 {
+            // 页面要求深色（如谱面工具箱）时，返回键也跟着用深色 —— 否则浅色图标压在深底上看不见
+            let bth = if self.pages.last().is_some_and(|p| p.prefers_dark()) {
+                newui::Theme::DARK
+            } else {
+                newui::theme()
+            };
             let base = newui::back_rect(ui, &m);
             // 命中区比可视方块大一圈：返回键是高频操作，点边缘落空会很难受。
             // 命中区按**最终位置**登记（动画期间也点得到，和 0.8.2 一致）。
@@ -987,13 +995,13 @@ impl Scene for MainScene {
             } * base.h)
                 .clamp(0., base.h);
             let r = Rect::new(base.x, base.y + dy, base.w, base.h);
-            newui::rounded(ui, r, m.u(6.), th.wash(0.05));
-            newui::rounded_stroke(ui, r, m.u(6.), m.u(1.), th.wash(0.08));
-            newui::draw_icon(ui, &m, newui::Icon::ChevronLeft, r.feather(-r.w * 0.3), th.text_dim, 1.8);
+            newui::rounded(ui, r, m.u(6.), bth.wash(0.05));
+            newui::rounded_stroke(ui, r, m.u(6.), m.u(1.), bth.wash(0.08));
+            newui::draw_icon(ui, &m, newui::Icon::ChevronLeft, r.feather(-r.w * 0.3), bth.text_dim, 1.8);
         }
 
-        // 页面自绘的顶栏（曲库的搜索框等）画在 fader 之外，跟着回开始界面的淡出一起走。
-        ui.alpha(1. - to_root_p, |ui| self.pages.last_mut().unwrap().render_top(ui, s))?;
+        // 页面自绘的顶栏（曲库的搜索框等）画在 fader 之外。
+        self.pages.last_mut().unwrap().render_top(ui, s)?;
 
         // 4. New UI 外壳：最后画，盖在页面之上
         {
@@ -1009,11 +1017,9 @@ impl Scene for MainScene {
             self.shell.player = me.map(|it| it.name.clone());
             self.shell.rks = me.map_or(0., |it| it.rks);
             self.shell.online = me.is_some() && !get_data().config.offline_mode;
-            // 回开始界面时外壳跟着淡出（`to_root_p`: 0 → 1），
-            // 否则它会在 WebView 铺上来的那一帧整块消失。
             let scene = self.shell.scene.clone();
             let st = s.t;
-            ui.alpha(1. - to_root_p, |ui| self.shell.render(ui, &m, &th, &scene, st));
+            self.shell.render(ui, &m, &th, &scene, st);
         }
 
         if get_data().config.mp_enabled {
@@ -1064,16 +1070,103 @@ INPUT_DIALOG_REGISTERED.call_once(|| {
     }
 
     fn next_scene(&mut self, _tm: &mut TimeManager) -> NextScene {
-        // WebView 请求启动的谱面优先（一次性消费）
-        if let Some(scene) = self.webui_next_scene.take() {
-            if let Some(bgm) = &mut self.bgm {
-                let _ = bgm.fade_out(0.5);
-            }
-            return scene;
+        // WebView 请求打开原生页面（设置 / 收藏 / 曲库）：先隐藏 WebView，再在游戏线程切页
+        // （页面要 icons，必须回游戏线程建，照 `PENDING_CHART` 的跨线程模式）。
+        if let Some(page) = crate::webui::take_pending_page() {
+            let _ = self.goto_hud_page(page);
+            return NextScene::None;
         }
-        let res = MP_PANEL
-            .with(|it| it.borrow_mut().as_mut().and_then(|it| it.next_scene()))
-            .unwrap_or(self.pages.last_mut().unwrap().next_scene(&mut self.state));
+        // WebView 请求打开「工具覆盖页」（谱面工具箱 / 活动）：这两页不是 `PageId`，
+        // 走另一条通道压在 Home 之上。
+        if let Some(tool) = crate::webui::take_pending_tool() {
+            let _ = self.open_web_tool(tool);
+            return NextScene::None;
+        }
+        // WebView 请求打开外部链接（QQ 频道等）：用系统浏览器打开。
+        if let Some(url) = crate::webui::take_pending_url() {
+            let _ = open_url(&url);
+            return NextScene::None;
+        }
+        // WebView 请求走「服务条款」流程：**必须在主线程**跑 —— 它会弹原生对话框
+        // 并写盘；在 WebView 线程跑会把消息泵卡死（「点在线分类就卡死」的根因）。
+        //
+        // ⚠️ 原生对话框画在游戏窗口上，而 WebView 是盖在它上面的子窗口 → 必须先
+        // 让位给原生，否则用户根本看不到弹窗。
+        if crate::webui::take_pending_tos() {
+            TOS_PENDING.store(true, std::sync::atomic::Ordering::Relaxed);
+            TOS_DIALOG_SHOWN.store(false, std::sync::atomic::Ordering::Relaxed);
+        }
+        if TOS_PENDING.load(std::sync::atomic::Ordering::Relaxed) {
+            use std::sync::atomic::Ordering;
+            if crate::scene::tos_ok_for_online() {
+                // 已通过（用户刚点了接受，或本来就接受过）→ 回曲库，清状态
+                TOS_PENDING.store(false, Ordering::Relaxed);
+                TOS_DIALOG_SHOWN.store(false, Ordering::Relaxed);
+                crate::webui::open_library();
+            } else if !TOS_DIALOG_SHOWN.load(Ordering::Relaxed) {
+                if crate::scene::tos_terms_loaded() {
+                    // 条款已拉到 → 这次调用一定会弹窗。**先让位给原生再弹**，
+                    // 否则 WebView 会盖住对话框（用户点不到「接受」）。
+                    TOS_DIALOG_SHOWN.store(true, Ordering::Relaxed);
+                    crate::webui::handoff_to_native();
+                    let _ = crate::scene::check_read_tos_and_policy(true, false);
+                } else {
+                    // 条款还没拉到：`check_read_tos_and_policy` 只会启动一次后台拉取
+                    // 并返回 false（**不弹窗**）。所以这里要**反复重试**推动它，
+                    // 且此时**不隐藏 WebView**（免得用户对着黑屏干等）。
+                    let n = TOS_RETRY.fetch_add(1, Ordering::Relaxed);
+                    if n % 30 == 0 {
+                        let _ = crate::scene::check_read_tos_and_policy(true, false);
+                    }
+                }
+            }
+        }
+        // WebView 曲库选好 3 张的课题模式：在这里构造 `ChallengeScene`
+        // （`ChartItem` 带曲绘纹理，必须在游戏线程用 `load_local()` 建）。
+        if let Some(paths) = crate::webui::take_pending_challenge() {
+            let all = crate::page::load_local();
+            let mut items: Vec<crate::page::ChartItem> = Vec::new();
+            for p in &paths {
+                if let Some(it) = all.iter().find(|it| it.local_path.as_deref() == Some(p.as_str())) {
+                    items.push(it.clone());
+                }
+            }
+            if items.len() == 3 {
+                let mut it = items.into_iter();
+                let arr = [it.next().unwrap(), it.next().unwrap(), it.next().unwrap()];
+                return NextScene::Overlay(Box::new(crate::scene::ChallengeScene::new(arr)));
+            }
+            crate::scene::show_message("课题谱面已失效，请重新选择").error();
+            return NextScene::None;
+        }
+        // WebView 曲库发起的段位考核：构造 DanScene（共享血条 + 禁重试/禁倒流）。
+        if let Some((paths, name)) = crate::webui::take_pending_dan() {
+            let all = crate::page::load_local();
+            let mut items: Vec<crate::page::ChartItem> = Vec::new();
+            for p in &paths {
+                if let Some(it) = all.iter().find(|it| it.local_path.as_deref() == Some(p.as_str())) {
+                    items.push(it.clone());
+                }
+            }
+            if items.len() == 3 {
+                let mut it = items.into_iter();
+                let arr = [it.next().unwrap(), it.next().unwrap(), it.next().unwrap()];
+                return NextScene::Overlay(Box::new(crate::scene::DanScene::new(arr, name)));
+            }
+            crate::scene::show_message("考核谱面已失效，请重新选择").error();
+            return NextScene::None;
+        }
+        // WebView 设置页（Setting.html）改了配置：合并 / 存档 / 触发生效。
+        crate::webui::apply_pending_config();
+        // WebView 资源包页（ResPack.html）的写操作：选中 / 导入 / 导出 / 删除。
+        crate::webui::apply_pending_respack();
+        // WebView（收藏夹里的 PLAY）请求开局：场景必须在这里构造 —— 贴图只能在游戏线程建。
+        let res = match crate::webui::take_next_scene(&mut self.state) {
+            Some(res) => res,
+            None => MP_PANEL
+                .with(|it| it.borrow_mut().as_mut().and_then(|it| it.next_scene()))
+                .unwrap_or(self.pages.last_mut().unwrap().next_scene(&mut self.state)),
+        };
         if !matches!(res, NextScene::None) {
             if let Some(bgm) = &mut self.bgm {
                 let _ = bgm.fade_out(0.5);

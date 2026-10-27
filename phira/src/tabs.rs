@@ -8,15 +8,51 @@ use std::borrow::Cow;
 
 pub type TitleFn = fn() -> Cow<'static, str>;
 
+/// 标签栏样式。
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TabStyle {
+    /// 默认：竖屏横排圆角块 / 横屏左侧竖栏（iOS 分组观感）。
+    Default,
+    /// **Phigros 设置页**：顶部横排**斜切标签**，选中 = 白色斜块 + 黑粗字
+    /// （参考 `D:\Phigros\kaichang\Setting.html`）。
+    Phigros,
+}
+
 struct TabItem<T> {
     value: T,
     title: TitleFn,
     btn: RectButton,
 }
 
+/// 量出一组 Phigros 标签的宽度（文字宽 + 左右内边距）。
+///
+/// 抽成自由函数是为了能在「超出可用宽度时整体缩小」那一步**重测一次**
+/// （闭包会长期借用 `ui`，和后面的渲染打架）。
+fn tab_widths<T>(
+    ui: &mut Ui,
+    items: &[TabItem<T>],
+    selected: usize,
+    fs_idle: f32,
+    fs_act: f32,
+    pad_idle: f32,
+    pad_act: f32,
+) -> Vec<f32> {
+    items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let (fs, pad) = if i == selected { (fs_act, pad_act) } else { (fs_idle, pad_idle) };
+            ui.text((item.title)()).size(fs).no_baseline().measure().w + pad * 2.
+        })
+        .collect()
+}
+
 pub struct Tabs<T> {
     items: Vec<TabItem<T>>,
     selected: usize,
+
+    /// 渲染样式（见 [`TabStyle`]）。
+    style: TabStyle,
 
     /// 竖排（左侧分类栏）还是横排（顶部分类条）。
     ///
@@ -60,6 +96,7 @@ impl<T> Tabs<T> {
                 })
                 .collect(),
             selected: 0,
+            style: TabStyle::Default,
             label_scale: 1.,
             horizontal: false,
 
@@ -77,6 +114,11 @@ impl<T> Tabs<T> {
     /// 切换横排 / 竖排（竖屏用横排，见字段注释）。
     pub fn set_horizontal(&mut self, v: bool) {
         self.horizontal = v;
+    }
+
+    /// 切换标签栏样式（见 [`TabStyle`]）。
+    pub fn set_style(&mut self, v: TabStyle) {
+        self.style = v;
     }
 
     /// 标签文字缩放（默认 1.0）。
@@ -218,6 +260,132 @@ impl<T> Tabs<T> {
         }
     }
 
+    /// **Phigros 样式**：顶部横排斜切标签 + 扁平内容区。
+    ///
+    /// 参考 `D:\Phigros\kaichang\Setting.html`：每个标签是一块平行四边形
+    /// （CSS `skewX(-15deg)`），未选中 = 灰字、选中 = 白色斜块 + 黑粗字，
+    /// 内容区直接铺在页面底上（不套面板）。
+    fn render_phigros(
+        &mut self,
+        ui: &mut Ui,
+        t: f32,
+        strip: Rect,
+        cr: Rect,
+        off: Vec2,
+        mut f: impl FnMut(&mut Ui, &mut T) -> Result<()>,
+    ) -> Result<()> {
+        let th = crate::newui::theme();
+        let m = crate::newui::Metrics::new(ui);
+        let n = self.items.len();
+        if n == 0 {
+            return Ok(());
+        }
+
+        // 设计稿 px → 世界坐标
+        let mut fs_idle = m.f(20.);
+        let mut fs_act = m.f(26.);
+        let mut pad_idle = m.u(24.);
+        let mut pad_act = m.u(42.);
+        let mut h_idle = m.u(44.);
+        let mut h_act = m.u(64.);
+        let mut gap = m.u(8.);
+
+        // 每项宽度 = 文字宽 + 左右内边距（选中项字号更大、内边距更宽）
+        let mut widths = tab_widths(ui, &self.items, self.selected, fs_idle, fs_act, pad_idle, pad_act);
+        let mut total: f32 = widths.iter().sum::<f32>() + gap * (n.saturating_sub(1)) as f32;
+        // 8 个标签在窄窗口下会顶到返回键 —— 超出就整体等比缩小（字号 / 内边距 / 高度）。
+        let max_w = strip.w * 0.92;
+        if total > max_w && total > 1e-6 {
+            let s = (max_w / total).max(0.45);
+            fs_idle *= s;
+            fs_act *= s;
+            pad_idle *= s;
+            pad_act *= s;
+            h_idle *= s;
+            h_act *= s;
+            gap *= s;
+            widths = tab_widths(ui, &self.items, self.selected, fs_idle, fs_act, pad_idle, pad_act);
+            total = widths.iter().sum::<f32>() + gap * (n.saturating_sub(1)) as f32;
+        }
+
+        // ≈ tan(19°)；参考图是 15°，视觉上略微加陡一点在暗背景上更立得住。
+        let skew = h_act * 0.34;
+        let cy = strip.center().y;
+        let x0 = strip.center().x - total * 0.5;
+
+        // 标签栏跟随 HUD 槽位偏移（内容区不跟随，与原实现一致）
+        ui.scope(|ui| {
+            ui.dx(off.x);
+            ui.dy(off.y);
+
+            // 命中区：用未斜切的包围盒（斜切只差几像素边角，够用）
+            let mut cx = x0;
+            for (i, item) in self.items.iter_mut().enumerate() {
+                let w = widths[i];
+                item.btn.set(ui, Rect::new(cx, cy - h_idle * 0.5, w, h_idle));
+                cx += w + gap;
+            }
+
+            // 未选中：灰字
+            let mut cx = x0;
+            for (i, item) in self.items.iter().enumerate() {
+                let w = widths[i];
+                if i != self.selected {
+                    let r = Rect::new(cx, cy - h_idle * 0.5, w, h_idle);
+                    ui.text((item.title)())
+                        .pos(r.center().x, r.center().y)
+                        .anchor(0.5, 0.5)
+                        .no_baseline()
+                        .max_width(w - m.u(6.))
+                        .size(fs_idle)
+                        .color(th.text_dim)
+                        .draw();
+                }
+                cx += w + gap;
+            }
+
+            // 选中项：白色斜块 + 黑粗字（最后画，压住相邻标签）
+            let sel = self.selected;
+            let w = widths[sel];
+            let x = x0 + widths[..sel].iter().sum::<f32>() + gap * sel as f32;
+            let r = Rect::new(x, cy - h_act * 0.5, w, h_act);
+            crate::newui::skew_rect(ui, r.feather(m.u(5.)), skew, Color::new(1., 1., 1., 0.12));
+            crate::newui::skew_rect(ui, r, skew, Color::new(1., 1., 1., 1.));
+            ui.text((self.items[sel].title)())
+                .pos(r.center().x, r.center().y)
+                .anchor(0.5, 0.5)
+                .no_baseline()
+                .max_width(w - m.u(8.))
+                .size(fs_act)
+                .color(Color::new(0., 0., 0., 1.))
+                .draw();
+        });
+
+        // 内容区：扁平（不铺面板），只保留切换过渡
+        let p = if get_data().prefer_reduced_motion {
+            1.
+        } else {
+            self.content_progress.now(t)
+        };
+        ui.scissor::<Result<()>>(cr, |ui| {
+            if p < 1. {
+                ui.scope(|ui| {
+                    let dy = Self::CONTENT_DY * p;
+                    ui.dy(if self.prev_go_up { -dy } else { dy });
+                    ui.alpha(1. - p, |ui| f(ui, &mut self.items[self.prev].value))
+                })?;
+            }
+            ui.scope(|ui| {
+                let dy = Self::CONTENT_DY * (1. - p);
+                ui.dy(if self.prev_go_up { dy } else { -dy });
+                ui.alpha(p, |ui| f(ui, &mut self.items[self.selected].value))
+            })?;
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
     pub fn render(&mut self, ui: &mut Ui, t: f32, page: &'static str, strip: Rect, cr: Rect, mut f: impl FnMut(&mut Ui, &mut T) -> Result<()>) -> Result<()> {
         // HUD 自定义布局：tab 栏整体可移动（key 由调用方给固定页面 key，避免非编辑模式下串页）。
         // 编辑模式下还能直接切分页。
@@ -229,6 +397,12 @@ impl<T> Tabs<T> {
             }
         }
         let off = vec2(slot.x - strip.x, slot.y - strip.y);
+
+        // Phigros 样式走独立分支（顶部斜切标签 + 扁平内容）
+        if self.style == TabStyle::Phigros {
+            return self.render_phigros(ui, t, slot, cr, off, f);
+        }
+
         let th = crate::newui::theme();
 
         // 整个 tab 栏画在带偏移的坐标空间里（渲染与命中一起跟随槽位）
