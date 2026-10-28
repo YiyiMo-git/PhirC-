@@ -1592,6 +1592,22 @@ fn serve_static_conn(mut stream: std::net::TcpStream) -> std::io::Result<()> {
             }
         }
     }
+    if status == 404 {
+        // 可读的 404：WebView 默认空白，出问题根本看不出是哪条 URL 挂了
+        let p = raw.split('?').next().unwrap_or("/");
+        let html = format!(
+            "<!doctype html><meta charset=\"utf-8\"><title>404</title>\
+             <body style=\"margin:0;padding:24px;background:#0b0d12;color:#9ddcef;\
+             font:14px/1.6 system-ui,sans-serif\"><h3 style=\"margin:0 0 8px\">页面不存在</h3>\
+             <p style=\"color:#7b93a0;word-break:break-all\">{}</p>\
+             <button onclick=\"(window.phirc&&phirc.backToLibrary)?phirc.backToLibrary():location.href='/library.html'\"\
+             style=\"margin-top:8px;padding:8px 16px;cursor:pointer;border-radius:3px;background:#123;\
+             color:#9ddcef;border:1px solid #2c6a80\">返回曲库</button></body>",
+            p.replace('<', "&lt;")
+        );
+        body = html.into_bytes();
+        mime = "text/html; charset=utf-8";
+    }
     let reason = match status {
         200 => "OK",
         500 => "Internal Server Error",
@@ -1604,6 +1620,20 @@ fn serve_static_conn(mut stream: std::net::TcpStream) -> std::io::Result<()> {
     stream.write_all(head.as_bytes())?;
     stream.write_all(&body)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod inject_script_tests {
+    use super::*;
+
+    #[test]
+    fn hotspot_only_on_real_start_page() {
+        // 开始页触点若只按「以 index.html 结尾」判断，会把第九章地图
+        // （http://127.0.0.1:port/chapter9/index.html）整页盖住 ——
+        // 必须同时要求 phirc 协议 + 路径就是 /index(.html) 或 /
+        assert!(HOTSPOT_JS.contains("location.protocol !== 'phirc:'"), "触点脚本必须校验协议");
+        assert!(HOTSPOT_JS.contains(r"/^\/(index(\.html)?)?$/"), "触点脚本必须精确匹配开始页路径");
+    }
 }
 
 #[cfg(all(test, any(target_os = "windows", target_os = "ios")))]
@@ -1647,6 +1677,11 @@ mod static_server_tests {
         // 曲绘路由：非法 p 参数应 404（而不是 panic / 200 空体）
         let cover = http_get(port, "/local-cover?p=!!!");
         assert!(cover.starts_with("HTTP/1.1 404"), "非法曲绘参数必须 404：{}", cover.lines().next().unwrap_or(""));
+        // 404 要给人看得懂的内容（带请求路径），不是空白
+        let miss = http_get(port, "/no-such-page.html");
+        assert!(miss.starts_with("HTTP/1.1 404"), "缺失页面必须 404");
+        assert!(miss.contains("页面不存在"), "404 页要有可读文案");
+        assert!(miss.contains("/no-such-page.html"), "404 页要回显请求路径");
     }
 }
 
@@ -4033,10 +4068,13 @@ const HOTSPOT_JS: &str = r#"
   // ⚠️ 千万别写成 `/(\/index(\.html)?)?$/` —— 整个分组可选 + `$` 锚点会让它对
   // **任何路径**都返回 true，于是收藏夹页也会被铺一层触点、卡片按钮全点不动。
   function isStartPage() {
+    // ⚠️ 只认**游戏自己的开始页**：phirc://web/index.html 或 phirc://web/。
+    // 本地静态服务的 http 页（第九章地图 /chapter9/index.html、RPEN）路径同样以
+    // index.html 结尾 —— 早先只按路径判断，结果整张地图被一层全屏透明触点盖住：
+    // 点哪都跳收藏夹（相对路径还会 404），地图完全不能交互。
+    if (location.protocol !== 'phirc:') { return false; }
     var p = location.pathname || '';
-    if (p === '') { return false; }
-    if (p.charAt(p.length - 1) === '/') { return true; }   // 目录 → 会取 index.html
-    return /\/index(\.html)?$/.test(p);                    // …/index 或 …/index.html
+    return /^\/(index(\.html)?)?$/.test(p);
   }
 
   function install() {

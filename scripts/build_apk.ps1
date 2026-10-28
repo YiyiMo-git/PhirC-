@@ -192,7 +192,9 @@ if (Test-Path $kaichangSrc) {
     $pages = @('index.html','tripsUide.html','tools.html','Setting.html','ResPack.html',
                'library.html','Replays.html','ChartPanel.html',
                # 制谱器 / 成长树 / MOD 管理：曲库顶部按钮会直接跳这些页面，漏拷就是 404
-               'ChartEditor.html','Growth.html','Mod.html')
+               'ChartEditor.html','Growth.html','Mod.html',
+               # BP 赛事主持连接入口（左下角 BP 钮常驻在 phirc 页上）
+               'bpHost.html')
     foreach ($f in $pages) {
         $src = Join-Path $kaichangSrc $f
         if (Test-Path $src) { Copy-Item $src (Join-Path $kaichangDst $f) -Force }
