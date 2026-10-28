@@ -1631,8 +1631,9 @@ mod inject_script_tests {
         // 开始页触点若只按「以 index.html 结尾」判断，会把第九章地图
         // （http://127.0.0.1:port/chapter9/index.html）整页盖住 ——
         // 必须同时要求 phirc 协议 + 路径就是 /index(.html) 或 /
-        assert!(HOTSPOT_JS.contains("location.protocol !== 'phirc:'"), "触点脚本必须校验协议");
-        assert!(HOTSPOT_JS.contains(r"/^\/(index(\.html)?)?$/"), "触点脚本必须精确匹配开始页路径");
+        assert!(HOTSPOT_JS.contains("'main-canvas'"), "触点脚本必须认开始页独有标记 main-canvas");
+        assert!(HOTSPOT_JS.contains("'char-area'"), "触点脚本必须认开始页独有标记 char-area");
+        assert!(HOTSPOT_JS.contains("chapter9"), "触点脚本必须排除静态服务子目录");
     }
 }
 
@@ -4068,13 +4069,18 @@ const HOTSPOT_JS: &str = r#"
   // ⚠️ 千万别写成 `/(\/index(\.html)?)?$/` —— 整个分组可选 + `$` 锚点会让它对
   // **任何路径**都返回 true，于是收藏夹页也会被铺一层触点、卡片按钮全点不动。
   function isStartPage() {
-    // ⚠️ 只认**游戏自己的开始页**：phirc://web/index.html 或 phirc://web/。
-    // 本地静态服务的 http 页（第九章地图 /chapter9/index.html、RPEN）路径同样以
-    // index.html 结尾 —— 早先只按路径判断，结果整张地图被一层全屏透明触点盖住：
-    // 点哪都跳收藏夹（相对路径还会 404），地图完全不能交互。
-    if (location.protocol !== 'phirc:') { return false; }
+    // ⚠️ 用**开始页独有的 DOM 标记**判断，别用 URL / 协议：
+    //   * 早先只按「路径以 index.html 结尾」判断 → 第九章地图（/chapter9/index.html）
+    //     命中，整页被一层全屏透明触点盖住，点哪都跳收藏夹（相对路径还 404）；
+    //   * 后来改成校验 location.protocol === 'phirc:' → 开始页触点反而装不上了
+    //     （WebView 里自定义协议报的 protocol 不保证是 'phirc:'），点击屏幕没反应。
+    // 开始页有 #main-canvas + #char-area，第九章（#map-canvas）/ RPEN 都没有。
+    if (!document.getElementById('main-canvas') || !document.getElementById('char-area')) {
+      return false;
+    }
     var p = location.pathname || '';
-    return /^\/(index(\.html)?)?$/.test(p);
+    if (/(^|\/)(chapter9|rpe-next)\//.test(p)) { return false; }   // 静态服务子目录双保险
+    return true;
   }
 
   function install() {
