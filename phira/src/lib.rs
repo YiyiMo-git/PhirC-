@@ -396,10 +396,14 @@ async fn the_main() -> Result<()> {
     });
     crash_log_stage("已加载 font.ttf");
 
+    // 官方视频回落目录：精简包不带 assets/video 时，把 mp4 放 <数据目录>/video/ 即可
+    prpr::video_res::set_fallback_dir(format!("{dir}/video"));
+
     // 打歌界面的 phigros.ttf 只含 ASCII + Latin-1（193 个字形），
     // 自定义连击文字之类的非拉丁字符会直接画成空白。把它挂上 font.ttf 作兜底：
     // prpr 的文字绘制会逐字回退到第二套字体，ASCII 的渲染路径完全不变。
     let pgr_font = FontArc::try_from_vec(load_file("phigros.ttf").await?)?;
+    let game_font_for_ui = game_font.clone();
     PGR_FONT.with(move |it| *it.borrow_mut() = Some(TextPainter::new(pgr_font, Some(game_font))));
     crash_log_stage("已加载 phigros.ttf");
 
@@ -416,35 +420,37 @@ async fn the_main() -> Result<()> {
     // 也只是字体回退，不会因为读不到文件而启动即退出。
     // 这跟游戏内文字用的 font.ttf 是两套字体，风格不同是有意的。
     // 设置里导入的自定义界面字体依然优先（写到 <data>/font.ttf）。
+    // 兜底链 best-effort：cmdysj.ttf 必在；ui-font.otf / harmonyos.ttf 是历史兜底，
+    // 精简包可以不带 —— 都没有就复用游戏字体，不能因为缺字体启动即退。
     let builtin_ui_font = match load_file("cmdysj.ttf").await {
         Ok(bytes) => match FontArc::try_from_vec(bytes) {
             Ok(font) => font,
             Err(err) => {
-                warn!("cmdysj.ttf 解析失败（{err:?}），回退 ui-font.otf");
-                match FontArc::try_from_vec(load_file("ui-font.otf").await?) {
-                    Ok(font) => font,
-                    Err(err) => {
-                        warn!("ui-font.otf 解析失败（{err:?}），回退 harmonyos.ttf");
-                        FontArc::try_from_vec(load_file("harmonyos.ttf").await?)?
-                    }
-                }
+                warn!("cmdysj.ttf 解析失败（{err:?}），走兜底字体");
+                fallback_ui_font(&game_font_for_ui).await?
             }
         },
         Err(err) => {
-            warn!("cmdysj.ttf 读取失败（{err}），回退 ui-font.otf");
-            match FontArc::try_from_vec(load_file("ui-font.otf").await?) {
-                Ok(font) => font,
-                Err(err) => {
-                    warn!("ui-font.otf 解析失败（{err:?}），回退 harmonyos.ttf");
-                    FontArc::try_from_vec(load_file("harmonyos.ttf").await?)?
-                }
-            }
+            warn!("cmdysj.ttf 读取失败（{err}），走兜底字体");
+            fallback_ui_font(&game_font_for_ui).await?
         }
     };
     crash_log_stage("已加载 cmdysj.ttf（界面字体，与 WebView 页统一）");
     let custom_font = std::fs::read(format!("{dir}/font.ttf"))
         .ok()
         .and_then(|it| FontArc::try_from_vec(it).ok());
+    async fn fallback_ui_font(game: &FontArc) -> anyhow::Result<FontArc> {
+        for name in ["ui-font.otf", "harmonyos.ttf"] {
+            if let Ok(bytes) = load_file(name).await {
+                match FontArc::try_from_vec(bytes) {
+                    Ok(f) => return Ok(f),
+                    Err(err) => warn!("{name} 解析失败（{err:?}）"),
+                }
+            }
+        }
+        warn!("界面字体（cmdysj/ui-font/harmonyos）均不可用，复用游戏字体兜底");
+        Ok(game.clone())
+    }
     let has_custom_font = custom_font.is_some();
     let font = custom_font.unwrap_or_else(|| builtin_ui_font.clone());
     let mut painter = TextPainter::new(font.clone(), has_custom_font.then(|| builtin_ui_font.clone()));

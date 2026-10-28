@@ -66,6 +66,9 @@ public class WebViewHost {
                     copyAssetDir(act.getAssets(), "kaichang/rpe-next", dst);
                     java.nio.file.Files.write(marker.toPath(), String.valueOf(RPE_ASSET_VERSION).getBytes(StandardCharsets.UTF_8));
                 }
+                // RPEN 的 @font-face 指向静态根 /cmdysj.ttf（APK 里只有根级一份，
+                // 不在 rpe-next 目录下），所以把根字体也拷到 filesDir 供静态服务读。
+                copyAssetFile(act.getAssets(), "cmdysj.ttf", new File(root, "cmdysj.ttf"));
                 final String rootPath = root.getAbsolutePath();
                 Log.i(TAG, "[rpe-next] 资源就绪：" + rootPath);
                 safeNative("nativeSetStaticRoot", () -> nativeSetStaticRoot(rootPath));
@@ -75,6 +78,16 @@ public class WebViewHost {
         }, "rpe-assets");
         t.setDaemon(true);
         t.start();
+    }
+
+    private static void copyAssetFile(android.content.res.AssetManager am, String from, File out) throws Exception {
+        if (out.isFile() && out.length() > 0) return;   // 已存在（同版本）就跳过
+        out.getParentFile().mkdirs();
+        try (InputStream in = am.open(from); FileOutputStream fo = new FileOutputStream(out)) {
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) fo.write(buf, 0, n);
+        }
     }
 
     private static void copyAssetDir(android.content.res.AssetManager am, String from, File to) throws Exception {

@@ -196,11 +196,15 @@ pub async fn parse_extra(source: &str, fs: &mut dyn FileSystem) -> Result<ChartE
         let path = video.path.clone();
         // 谱包优先；谱包没有时回落到内置官方视频（assets/video/）。
         // witness 类视频（如 TimeReverse_Video.mp4）在原游戏是内置资源，谱面只写文件名。
-        let data = match fs.load_file(&path).await {
-            Ok(data) => data,
-            Err(_) => macroquad::file::load_file(&format!("video/{path}"))
+        let data = if let Ok(data) = fs.load_file(&path).await {
+            data
+        } else if let Some(data) = crate::video_res::read(&path) {
+            // 数据目录 video/（精简包把视频放这里，见 video_res 模块注释）
+            data
+        } else {
+            macroquad::file::load_file(&format!("video/{path}"))
                 .await
-                .with_context(|| ptl!("video-load-failed", "path" => path.clone()))?,
+                .with_context(|| ptl!("video-load-failed", "path" => path.clone()))?
         };
         videos.push((
             Video::new(

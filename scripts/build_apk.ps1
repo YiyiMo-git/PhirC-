@@ -5,6 +5,11 @@
 #   B. 先 cd 到仓库根，再把脚本内容贴进 PowerShell（本脚本会从当前目录向上找仓库根）
 # ⚠️ 不要从 C:\Users\xxx> 直接贴——那样找不到仓库根。
 #
+param(
+    # 把 86MB 的内置官方视频打回 APK（默认不打：运行时回落链 谱包 → <数据目录>/video/ → assets）
+    [switch]$WithVideos
+)
+
 # 前置工具链（脚本会自动探测，缺了会打印安装命令并退出）：
 #   - Android SDK + NDK 26.1.10909125（设 ANDROID_SDK_ROOT / ANDROID_NDK_HOME，或放常见路径）
 #   - Gradle 8.9+（AGP 8.5.2 要求）
@@ -166,6 +171,17 @@ New-Item  $assetsDst -ItemType Directory | Out-Null
 Copy-Item (Join-Path $root 'assets\*') $assetsDst -Recurse -Force
 Remove-Item (Join-Path $assetsDst 'dist') -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $assetsDst 'res')  -Recurse -Force -ErrorAction SilentlyContinue
+# ---- 瘦身：默认剔除视频（86MB）与历史字体兜底（21MB） ----
+if ($WithVideos) {
+    Write-Host "[full] 保留 assets/video（-WithVideos）"
+} else {
+    Remove-Item (Join-Path $assetsDst 'video') -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "[small] 已剔除 assets/video（86MB）：谱面视频放 <数据目录>/video/ 或用 -WithVideos 重打"
+}
+# harmonyos.ttf + ui-font.otf 只是 cmdysj.ttf 的历史兜底（lib.rs 已改 best-effort），APK 不带
+foreach ($f in 'harmonyos.ttf','ui-font.otf') {
+    Remove-Item (Join-Path $assetsDst $f) -Force -ErrorAction SilentlyContinue
+}
 
 # WebView 界面层（kaichang/*.html）：安卓端 WebView 也要用同一套页面。
 # 只拷真正要用的文件 + 资源，别把 plugins/ 里的示例包和临时文件塞进 APK。

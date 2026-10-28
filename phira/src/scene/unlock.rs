@@ -57,11 +57,14 @@ impl UnlockScene {
         // 谱包内优先；谱包没有时回落到内置官方视频（assets/video/）。
         // 原游戏的解锁视频是**内置资源**，谱面 info 只写文件名 —— 没有兜底的话，
         // 官方谱面（或没打包视频的谱面）一按播放就「Cannot find unlock video file」直接开局失败。
-        let bytes = match fs.load_file(&video_name).await {
-            Ok(bytes) => bytes,
-            Err(_) => macroquad::file::load_file(&format!("video/{video_name}"))
+        let bytes = if let Ok(bytes) = fs.load_file(&video_name).await {
+            bytes
+        } else if let Some(bytes) = prpr::video_res::read(&video_name) {
+            bytes
+        } else {
+            macroquad::file::load_file(&format!("video/{video_name}"))
                 .await
-                .with_context(|| format!("Cannot find unlock video file: {video_name}（谱包与内置视频均没有）"))?,
+                .with_context(|| format!("Cannot find unlock video file: {video_name}（谱包、数据目录与内置视频均没有）"))?
         };
         let video = Video::new(bytes, 0., ScaleType::Inside, Anim::new(vec![Keyframe::new(0., 1., 0)]), Anim::default())?;
         let clip = demux_audio(video.video_file().path().to_str().unwrap())?;

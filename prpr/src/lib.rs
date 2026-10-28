@@ -8,6 +8,7 @@ pub mod chart_play;
 pub mod config;
 pub mod core;
 pub mod dir;
+pub mod video_res;
 pub mod ext;
 pub mod fs;
 pub mod health;
