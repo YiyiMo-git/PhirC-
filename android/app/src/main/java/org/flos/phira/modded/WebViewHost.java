@@ -51,31 +51,37 @@ public class WebViewHost {
     /** 告诉 Rust 静态服务的根目录（RPEN 页面要跑在 http://127.0.0.1 上，资源必须先落地）。 */
     private static native void nativeSetStaticRoot(String path);
 
-    // ---- RPEN 资源落地（assets → filesDir，带版本号缓存） ----
-    private static final int RPE_ASSET_VERSION = 1;
+    // ---- 静态服务资源落地（assets → filesDir，带版本号缓存） ----
+    // rpe-next（RPEN 编辑器）与 chapter9（曲库「第九章」地图）都是 ES module 应用，
+    // file:// 下跑不起来，必须在本地 http 静态服务上；APK assets 不是普通文件，
+    // 所以先解压到 filesDir，再把根目录通知给 Rust（nativeSetStaticRoot）。
+    private static final int STATIC_ASSET_VERSION = 2;
+    private static final String[] STATIC_ASSET_DIRS = { "rpe-next", "chapter9" };
 
     private void ensureRpeNextAssets(Activity act) {
         Thread t = new Thread(() -> {
             try {
                 File root = act.getFilesDir();
-                File marker = new File(root, "rpe-next/.asset-version");
-                String cur = marker.isFile() ? new String(java.nio.file.Files.readAllBytes(marker.toPath()), StandardCharsets.UTF_8).trim() : "";
-                if (!String.valueOf(RPE_ASSET_VERSION).equals(cur)) {
-                    File dst = new File(root, "rpe-next");
-                    deleteRec(dst);
-                    copyAssetDir(act.getAssets(), "kaichang/rpe-next", dst);
-                    java.nio.file.Files.write(marker.toPath(), String.valueOf(RPE_ASSET_VERSION).getBytes(StandardCharsets.UTF_8));
+                for (String dir : STATIC_ASSET_DIRS) {
+                    File marker = new File(root, dir + "/.asset-version");
+                    String cur = marker.isFile() ? new String(java.nio.file.Files.readAllBytes(marker.toPath()), StandardCharsets.UTF_8).trim() : "";
+                    if (!String.valueOf(STATIC_ASSET_VERSION).equals(cur)) {
+                        File dst = new File(root, dir);
+                        deleteRec(dst);
+                        copyAssetDir(act.getAssets(), "kaichang/" + dir, dst);
+                        java.nio.file.Files.write(marker.toPath(), String.valueOf(STATIC_ASSET_VERSION).getBytes(StandardCharsets.UTF_8));
+                    }
                 }
                 // RPEN 的 @font-face 指向静态根 /cmdysj.ttf（APK 里只有根级一份，
                 // 不在 rpe-next 目录下），所以把根字体也拷到 filesDir 供静态服务读。
                 copyAssetFile(act.getAssets(), "cmdysj.ttf", new File(root, "cmdysj.ttf"));
                 final String rootPath = root.getAbsolutePath();
-                Log.i(TAG, "[rpe-next] 资源就绪：" + rootPath);
+                Log.i(TAG, "[web-static] 资源就绪：" + rootPath);
                 safeNative("nativeSetStaticRoot", () -> nativeSetStaticRoot(rootPath));
             } catch (Throwable t2) {
-                Log.w(TAG, "[rpe-next] 资源解压失败（RPEN 将不可用）", t2);
+                Log.w(TAG, "[web-static] 资源解压失败（RPEN / 第九章将不可用）", t2);
             }
-        }, "rpe-assets");
+        }, "web-static-assets");
         t.setDaemon(true);
         t.start();
     }
