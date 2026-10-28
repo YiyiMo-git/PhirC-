@@ -1548,23 +1548,46 @@ fn serve_static_conn(mut stream: std::net::TcpStream) -> std::io::Result<()> {
     let mut body = Vec::new();
     let mut mime = "text/plain; charset=utf-8";
     if method == "GET" {
-        let path = raw.split('?').next().unwrap_or("/");
+        let (path, query) = match raw.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (raw, None),
+        };
         let decoded = percent_decode(path).unwrap_or_else(|| path.to_owned());
-        let rel = decoded.trim_start_matches('/');
-        if let Some(root) = static_root() {
-            let full = root.join(rel);
-            let inside = match (full.canonicalize(), root.canonicalize()) {
-                (Ok(f), Ok(r)) => f.starts_with(&r),
-                _ => false,
-            };
-            if inside && full.is_file() {
-                match std::fs::read(&full) {
-                    Ok(bytes) => {
-                        status = 200;
-                        body = bytes;
-                        mime = mime_of(&full.to_string_lossy());
+        // http 页面（第九章地图 / RPEN）也要能取曲绘与资源包贴图 ——
+        // 与 `phirc://web/local-cover`、`phirc://web/respack/<idx>/<file>` 等价。
+        #[cfg(any(target_os = "windows", target_os = "ios"))]
+        {
+            if decoded == "/local-cover" {
+                if let Some(bytes) = local_cover_query(query) {
+                    status = 200;
+                    body = bytes;
+                    mime = "image/jpeg";
+                }
+            } else if let Some(rest) = decoded.strip_prefix("/respack/") {
+                if let Some((bytes, m)) = serve_respack(rest) {
+                    status = 200;
+                    body = bytes;
+                    mime = m;
+                }
+            }
+        }
+        if status != 200 {
+            let rel = decoded.trim_start_matches('/');
+            if let Some(root) = static_root() {
+                let full = root.join(rel);
+                let inside = match (full.canonicalize(), root.canonicalize()) {
+                    (Ok(f), Ok(r)) => f.starts_with(&r),
+                    _ => false,
+                };
+                if inside && full.is_file() {
+                    match std::fs::read(&full) {
+                        Ok(bytes) => {
+                            status = 200;
+                            body = bytes;
+                            mime = mime_of(&full.to_string_lossy());
+                        }
+                        Err(_) => status = 500,
                     }
-                    Err(_) => status = 500,
                 }
             }
         }
@@ -1616,6 +1639,14 @@ mod static_server_tests {
         assert!(js.contains("javascript"), "模块 MIME 必须是 javascript（否则 ES module 不加载）");
         let bad = http_get(port, "/../Cargo.toml");
         assert!(bad.starts_with("HTTP/1.1 404"), "越界必须 404：{}", bad.lines().next().unwrap_or(""));
+        // 从第九章（http 页）返回曲库时，页面本身与封面路由也必须能取到
+        let lib = http_get(port, "/library.html");
+        assert!(lib.starts_with("HTTP/1.1 200"), "library.html 状态：{}", lib.lines().next().unwrap_or(""));
+        let ch9 = http_get(port, "/chapter9/index.html");
+        assert!(ch9.starts_with("HTTP/1.1 200"), "chapter9 状态：{}", ch9.lines().next().unwrap_or(""));
+        // 曲绘路由：非法 p 参数应 404（而不是 panic / 200 空体）
+        let cover = http_get(port, "/local-cover?p=!!!");
+        assert!(cover.starts_with("HTTP/1.1 404"), "非法曲绘参数必须 404：{}", cover.lines().next().unwrap_or(""));
     }
 }
 
@@ -2059,6 +2090,41 @@ fn handle_ipc(body: &str, tx: &mpsc::Sender<WebCmd>) {
             let _ = tx.send(WebCmd::Navigate(format!(
                 "http://127.0.0.1:{port}/rpe-next/index.html?phirc_path={q}"
             )));
+        }
+        // 本地谱面曲绘缩略图（base64 JPEG）：章节地图把曲库谱面画成地图节点用
+        "chart_cover" => {
+            let dir = req.get("args").and_then(|a| a.get("path")).and_then(|v| v.as_str()).unwrap_or("").to_owned();
+            let height = req.get("args").and_then(|a| a.get("height")).and_then(|v| v.as_u64()).unwrap_or(360) as u32;
+            if dir.is_empty() {
+                reply(json!({ "ok": false, "error": "缺少谱面目录" }));
+                return;
+            }
+            let tx2 = tx.clone();
+            let pid = req.get("id").cloned();
+            std::thread::spawn(move || {
+                let payload = match crate::editor::chart_cover(&dir, height) {
+                    Ok(v) => v,
+                    Err(e) => json!({ "ok": false, "error": format!("{e:#}") }),
+                };
+                reply_async(&tx2, &pid, payload);
+            });
+        }
+        // 曲库「第九章」排版：进本地静态服务的章节地图页
+        "open_chapter9" => {
+            let port = static_port();
+            if port == 0 {
+                reply(json!({ "ok": false, "error": "静态服务启动失败（见 phira-crash.log）" }));
+                return;
+            }
+            reply(json!({ "ok": true, "port": port }));
+            let _ = tx.send(WebCmd::Navigate(format!(
+                "http://127.0.0.1:{port}/chapter9/index.html?phirc=1"
+            )));
+        }
+        // 从第九章地图返回曲库（跨协议跳转只能由 Rust 侧 Navigate 发起）
+        "back_to_library" => {
+            reply(json!({ "ok": true }));
+            let _ = tx.send(WebCmd::Navigate("phirc://web/library.html".to_owned()));
         }
         // 从 rpe-next 返回制谱器（跨协议跳转只能由 Rust 侧 Navigate 发起）
         "back_to_editor" => {
@@ -3728,6 +3794,9 @@ const BRIDGE_JS: &str = r#"
     saveChart: function (path, chart, format) { return call('save_chart', { path: String(path), chart: chart, format: String(format || 'pgr') }); },
     editorWaveform: function (path, buckets) { return call('editor_waveform', { path: String(path), buckets: Number(buckets) || 1600 }); },
     openRpen: function (path) { return call('open_rpen', { path: String(path) }); },
+    openChapter9: function () { return call('open_chapter9', {}); },
+    chartCover: function (path, height) { return call('chart_cover', { path: String(path), height: Number(height) || 360 }); },
+    backToLibrary: function () { return call('back_to_library', {}); },
     backToEditor: function (path) { return call('back_to_editor', { path: String(path) }); },
     writeChartFile: function (path, name, text) { return call('write_chart_file', { path: String(path), name: String(name), text: String(text) }); },
     editorBundle: function (path) { return call('editor_bundle', { path: String(path) }); },
@@ -4496,7 +4565,16 @@ fn start() -> Result<Host> {
                         // 页面内 `location.href`，所以这里改走客户端导航（用**相对路径**，
                         // 与开始页触点 / tripsUide 那条路的写法一致）。
                         let target = url.strip_prefix("phirc://web/").map(|p| p.to_owned()).unwrap_or(url);
-                        let script = format!("window.location.href = {};", serde_json::to_string(&target).unwrap_or_default());
+                        // ⚠️ 当前页若是本地静态服务的 http 页（第九章地图 / RPEN），
+                        // 相对路径会解析成 `http://127.0.0.1:port/chapter9/xxx.html` → 404。
+                        // 所以 http 页面下要拼成静态根下的绝对 URL。
+                        let script = format!(
+                            "(() => {{ const t = {}; \
+                              if (location.protocol === 'http:' || location.protocol === 'https:') {{ \
+                                location.href = new URL('/' + t.replace(/^\\/+/, ''), location.href).href; \
+                              }} else {{ location.href = t; }} }})();",
+                            serde_json::to_string(&target).unwrap_or_default()
+                        );
                         if let Err(e) = webview.evaluate_script(&script) {
                             tracing::error!("[webui] Navigate evaluate_script({target}) 失败：{e:?}");
                         }

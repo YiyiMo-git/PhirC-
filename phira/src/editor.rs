@@ -869,6 +869,36 @@ pub fn bundle(dir: &str) -> Result<Value> {
     }))
 }
 
+/// 曲绘缩略图（base64 JPEG）：章节地图 / 曲库要展示本地谱面的封面。
+///
+/// 只读 `info.yml` 的 illustration 并缩放到指定高度（默认 360），不碰音频，
+/// 比 `bundle` 轻几百倍。解码失败 / 没有曲绘都返回错误，页面侧退化成文字卡片。
+pub fn chart_cover(dir: &str, height: u32) -> Result<Value> {
+    use base64::Engine as _;
+    let dir = resolve_dir(dir);
+    if dir.is_empty() {
+        bail!("缺少谱面目录");
+    }
+    let info = read_info(&dir)?;
+    let ill = info.get("illustration").and_then(|v| v.as_str()).unwrap_or("");
+    if ill.is_empty() {
+        bail!("谱面没有配置曲绘");
+    }
+    let path = Path::new(&dir).join(ill);
+    let bytes = std::fs::read(&path).with_context(|| format!("读取 {} 失败", path.display()))?;
+    let img = image::load_from_memory(&bytes).context("曲绘解码失败")?;
+    let h = height.clamp(120, 720);
+    let w = ((img.width() as f32 / img.height().max(1) as f32) * h as f32).ceil().max(1.) as u32;
+    let thumb = image::DynamicImage::ImageRgba8(image::imageops::thumbnail(&img, w, h));
+    let mut out = std::io::Cursor::new(Vec::new());
+    thumb.write_to(&mut out, image::ImageFormat::Jpeg).context("编码 JPEG 失败")?;
+    Ok(json!({
+        "ok": true,
+        "mime": "image/jpeg",
+        "b64": base64::engine::general_purpose::STANDARD.encode(out.into_inner()),
+    }))
+}
+
 /// 音乐波形峰值（时间轴用）：解码音频后按桶取 `max(|L|, |R|)`，返回 `{ ok, duration, peaks }`。
 ///
 /// 页面只画波形、不做分析，所以直接给降采样峰值数组（默认 1600 桶 ≈ 一首 2 分钟歌
