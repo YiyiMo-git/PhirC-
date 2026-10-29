@@ -1569,6 +1569,44 @@ mod tests {
     }
 
     #[test]
+    fn chart_cover_real_charts() {
+        // 本机联调：扫一遍真实曲库，打印 chart_cover 结果（目录不存在就跳过）
+        let root = std::path::Path::new("D:/Phigros/PhiRa-Mod-Meew-11/rev/phira-pc/data/charts");
+        if !root.is_dir() {
+            eprintln!("[skip] 本机没有曲库目录");
+            return;
+        }
+        let mut tried = 0;
+        let mut ok = 0;
+        let mut last_err = String::new();
+        for src in ["custom", "download"] {
+            let d = root.join(src);
+            let entries = match std::fs::read_dir(&d) {
+                Ok(it) => it,
+                Err(_) => continue,
+            };
+            for e in entries.flatten() {
+                let path = e.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                tried += 1;
+                match chart_cover(path.to_str().unwrap_or(""), 320) {
+                    Ok(_) => ok += 1,
+                    Err(err) => last_err = format!("{}: {:#}", path.display(), err),
+                }
+                if tried >= 6 {
+                    break;
+                }
+            }
+        }
+        eprintln!("[real] tried={ok}/{tried} last_err={last_err}");
+        if tried > 0 {
+            assert!(ok > 0, "真实曲库至少一张能出封面（last_err={last_err}）");
+        }
+    }
+
+    #[test]
     fn chart_cover_smoke() {
         // 临时目录：info.yml + 4x4 红色 JPEG → chart_cover 应返回非空 base64
         let dir = std::env::temp_dir().join(format!("scorelab-cover-{}", std::process::id()));
