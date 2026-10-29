@@ -1569,6 +1569,24 @@ mod tests {
     }
 
     #[test]
+    fn chart_cover_smoke() {
+        // 临时目录：info.yml + 4x4 红色 JPEG → chart_cover 应返回非空 base64
+        let dir = std::env::temp_dir().join(format!("scorelab-cover-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let img = image::DynamicImage::ImageRgba8(image::ImageBuffer::from_pixel(
+            4,
+            4,
+            image::Rgba([200u8, 30, 30, 255]),
+        ));
+        img.save(dir.join("cover.jpg")).unwrap();
+        std::fs::write(dir.join("info.yml"), "name: 封面测试\nillustration: cover.jpg\n").unwrap();
+        let v = chart_cover(dir.to_str().unwrap(), 320).expect("chart_cover 应成功");
+        assert_eq!(v["ok"], serde_json::json!(true));
+        assert!(!v["b64"].as_str().unwrap_or("").is_empty(), "base64 不能为空");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn resolve_dir_handles_relative() {
         assert_eq!(resolve_dir(""), "");
         // 绝对路径原样返回（Windows 盘符 / Unix 根）
