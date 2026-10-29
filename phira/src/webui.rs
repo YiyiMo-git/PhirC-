@@ -2674,7 +2674,9 @@ fn handle_ipc(body: &str, tx: &mpsc::Sender<WebCmd>) {
             if path.is_empty() {
                 reply(json!({ "ok": false, "error": "缺少 path" }));
             } else {
-                *PENDING_CHART.lock().unwrap() = Some(path.to_owned());
+                // 曲库/制谱器传的可能是相对 data/charts 的路径 —— 统一归一化
+                let path = crate::editor::resolve_dir(path);
+                *PENDING_CHART.lock().unwrap() = Some(path);
                 // 也置 handoff：打完这一局回到 MainScene 时，应该回到刚点 PLAY 的那个页面。
                 WEBVIEW_HANDOFF.store(true, Ordering::Relaxed);
                 WEBVIEW_VISIBLE.store(false, Ordering::Relaxed);
