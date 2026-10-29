@@ -55,21 +55,31 @@ public class WebViewHost {
     // rpe-next（RPEN 编辑器）与 chapter9（曲库「第九章」地图）都是 ES module 应用，
     // file:// 下跑不起来，必须在本地 http 静态服务上；APK assets 不是普通文件，
     // 所以先解压到 filesDir，再把根目录通知给 Rust（nativeSetStaticRoot）。
-    private static final int STATIC_ASSET_VERSION = 2;
     private static final String[] STATIC_ASSET_DIRS = { "rpe-next", "chapter9" };
 
     private void ensureRpeNextAssets(Activity act) {
         Thread t = new Thread(() -> {
             try {
                 File root = act.getFilesDir();
+                // 版本指纹 = 构建脚本生成的 kaichang/webver.txt（rpe-next + chapter9 全部
+                // 文件的内容哈希）。任一 Web 文件变化 → 指纹变化 → 自动重解压。
+                // ⚠️ 以前靠手动递增 STATIC_ASSET_VERSION，忘了递增 = 修复永远到不了真机。
+                String webver = "";
+                try (java.io.InputStream iv = act.getAssets().open("kaichang/webver.txt")) {
+                    java.util.Scanner sc = new java.util.Scanner(iv, StandardCharsets.UTF_8.name()).useDelimiter("\\A");
+                    webver = sc.hasNext() ? sc.next().trim() : "";
+                } catch (Exception e) {
+                    Log.w(TAG, "[web-static] 读取 webver.txt 失败，按强制重解压处理", e);
+                }
                 for (String dir : STATIC_ASSET_DIRS) {
                     File marker = new File(root, dir + "/.asset-version");
                     String cur = marker.isFile() ? new String(java.nio.file.Files.readAllBytes(marker.toPath()), StandardCharsets.UTF_8).trim() : "";
-                    if (!String.valueOf(STATIC_ASSET_VERSION).equals(cur)) {
+                    if (webver.isEmpty() || !webver.equals(cur)) {
                         File dst = new File(root, dir);
                         deleteRec(dst);
                         copyAssetDir(act.getAssets(), "kaichang/" + dir, dst);
-                        java.nio.file.Files.write(marker.toPath(), String.valueOf(STATIC_ASSET_VERSION).getBytes(StandardCharsets.UTF_8));
+                        java.nio.file.Files.write(marker.toPath(), webver.getBytes(StandardCharsets.UTF_8));
+                        Log.i(TAG, "[web-static] " + dir + " 已重解压（webver=" + webver + "）");
                     }
                 }
                 // RPEN 的 @font-face 指向静态根 /cmdysj.ttf（APK 里只有根级一份，

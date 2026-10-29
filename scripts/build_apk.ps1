@@ -221,6 +221,21 @@ if (Test-Path $kaichangSrc) {
     foreach ($dup in 'cmdysj.ttf','phirc.png','TriGridBase.png') {
         Remove-Item (Join-Path $kaichangDst "assets\$dup") -ErrorAction SilentlyContinue
     }
+    # ---- Web 资源版本指纹：rpe-next / chapter9 任一文件变化都会改变 webver，
+    # ---- 安卓启动时据此自动重解压（以前靠手动递增版本号，忘了递增 = 修复到不了真机）
+    $hashInput = ''
+    foreach ($wd in 'rpe-next', 'chapter9') {
+        $wsrc = Join-Path $kaichangSrc $wd
+        if (Test-Path $wsrc) {
+            Get-ChildItem $wsrc -Recurse -File | Sort-Object FullName | ForEach-Object {
+                $hashInput += $_.FullName.Substring($kaichangSrc.Length) + '|' +
+                    (Get-FileHash $_.FullName -Algorithm MD5).Hash + "`n"
+            }
+        }
+    }
+    $webver = (Get-FileHash -InputStream ([System.IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($hashInput))) -Algorithm SHA1).Hash
+    Set-Content -Path (Join-Path $assetsDst 'kaichang\webver.txt') -Value $webver -NoNewline -Encoding ascii
+    Write-Host "  webver = $webver"
     Write-Host "  已打包 WebView 页面到 assets/kaichang/（assets/ 去重 3 个文件）"
 } else {
     Write-Host "  ⚠️ 找不到 kaichang 源目录，跳过 WebView 页面打包"
