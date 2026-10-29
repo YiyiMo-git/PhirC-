@@ -52,6 +52,25 @@ fn entry_url() -> String {
     }
 }
 
+/// 生成「导航到 target」的注入脚本。
+///
+/// ⚠️ 不能用 `location.protocol` 判断页面来源：WebView 里 phirc 页报的 protocol 是 `http:`。
+/// 这里按**目标形态**分流：
+///   1) 目标已是绝对 http(s) URL（open_rpen / open_chapter9）→ 直接跳；
+///   2) 当前页在本地静态服务（127.0.0.1）→ 相对路径拼成静态根绝对地址，
+///      否则会解析成 `/chapter9/xxx.html` → 404；
+///   3) 其它（phirc 页）→ 相对路径原样交给浏览器。
+fn navigate_script(target: &str) -> String {
+    format!(
+        "(() => {{ const t = {t}; \
+          if (/^https?:\\/\\//i.test(t)) {{ location.href = t; return; }} \
+          const h = location.href; \
+          const onStatic = h.indexOf('http://127.0.0.1:') === 0 || h.indexOf('http://localhost:') === 0; \
+          location.href = onStatic ? new URL('/' + t.replace(/^\\/+/, ''), h).href : t; }})();",
+        t = serde_json::to_string(target).unwrap_or_default()
+    )
+}
+
 /// 主线程 / IPC 线程 → WebView 线程 的命令。
 enum WebCmd {
     /// 在页面里执行一段 JS（IPC 回包 / 推事件用）
@@ -420,6 +439,8 @@ const MOD_CATALOG: &[(&str, &str, &str, bool, &str)] = &[
     ("noComboScore", "去连击分", "分数 = 准确率 × 1,000,000（不上传）", false, ""),
     ("fullScreenJudge", "全屏判定", "屏幕任意位置都能判定（不上传）", false, ""),
     ("healthMode", "血条模式", "Perfect 回血 / Bad 扣血，归零失败（不上传）", false, ""),
+    ("autoplayOffbeat", "奥拓普雷手感不好", "自动播放，但每个音符提前 80ms 命中且判 Good（不上传）", false, ""),
+    ("lastNoteGood", "性歌", "谱面最后一个 Tap / Hold 强制判 Good（不上传）", false, ""),
 ];
 
 fn mod_flag(id: &str) -> Option<prpr::config::Mods> {
@@ -434,6 +455,8 @@ fn mod_flag(id: &str) -> Option<prpr::config::Mods> {
         "instantDeathAp" => Mods::INSTANT_DEATH_AP,
         "instantDeathFc" => Mods::INSTANT_DEATH_FC,
         "noShader" => Mods::NO_SHADER,
+        "autoplayOffbeat" => Mods::AUTOPLAY_OFFBEAT,
+        "lastNoteGood" => Mods::LAST_NOTE_GOOD,
         "noComboScore" => Mods::NO_COMBO_SCORE,
         "fullScreenJudge" => Mods::FULL_SCREEN_JUDGE,
         "healthMode" => Mods::HEALTH_MODE,
@@ -1625,6 +1648,16 @@ fn serve_static_conn(mut stream: std::net::TcpStream) -> std::io::Result<()> {
 #[cfg(test)]
 mod inject_script_tests {
     use super::*;
+
+    #[test]
+    fn navigate_handles_absolute_and_static() {
+        let abs = navigate_script("http://127.0.0.1:47653/chapter9/index.html?phirc=1");
+        assert!(abs.contains("/^https?:\\/\\//i.test(t)"), "必须识别绝对地址并直跳");
+        assert!(abs.contains("\"http://127.0.0.1:47653/chapter9/index.html?phirc=1\""), "目标要原样带上");
+        let rel = navigate_script("library.html");
+        assert!(rel.contains("onStatic"), "相对路径要按页面来源分流");
+        assert!(rel.contains("http://127.0.0.1:"), "要能识别本地静态服务");
+    }
 
     #[test]
     fn hotspot_only_on_real_start_page() {
@@ -4611,16 +4644,7 @@ fn start() -> Result<Host> {
                         // 页面内 `location.href`，所以这里改走客户端导航（用**相对路径**，
                         // 与开始页触点 / tripsUide 那条路的写法一致）。
                         let target = url.strip_prefix("phirc://web/").map(|p| p.to_owned()).unwrap_or(url);
-                        // ⚠️ 当前页若是本地静态服务的 http 页（第九章地图 / RPEN），
-                        // 相对路径会解析成 `http://127.0.0.1:port/chapter9/xxx.html` → 404。
-                        // 所以 http 页面下要拼成静态根下的绝对 URL。
-                        let script = format!(
-                            "(() => {{ const t = {}; \
-                              if (location.protocol === 'http:' || location.protocol === 'https:') {{ \
-                                location.href = new URL('/' + t.replace(/^\\/+/, ''), location.href).href; \
-                              }} else {{ location.href = t; }} }})();",
-                            serde_json::to_string(&target).unwrap_or_default()
-                        );
+                        let script = navigate_script(&target);
                         if let Err(e) = webview.evaluate_script(&script) {
                             tracing::error!("[webui] Navigate evaluate_script({target}) 失败：{e:?}");
                         }
