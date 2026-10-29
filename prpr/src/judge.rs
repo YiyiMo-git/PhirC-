@@ -403,6 +403,10 @@ pub struct Judge {
     pub recent_judgements: Vec<(Judgement, f64)>,
     /// 漏键标记：被判为 Bad / Miss 的音符在判定线上的位置，供「漏键标记」画出来。
     pub miss_marks: Vec<MissMark>,
+    /// 「性歌」mod 的目标：谱面里时间最晚的那个 Tap / Hold（line_id, note_id）。
+    pub last_note: Option<(u32, u32)>,
+    /// 「性歌」mod 是否生效：命中该音符时把 Perfect 降为 Good。
+    pub force_last_good: bool,
 }
 
 /// 时间倒流的判定状态快照（[`Judge::snapshot`] / [`Judge::restore`]）。
@@ -467,7 +471,33 @@ impl Judge {
             feedback: Vec::new(),
             recent_judgements: Vec::new(),
             miss_marks: Vec::new(),
+            last_note: Self::find_last_note(chart),
+            force_last_good: false,
         }
+    }
+
+    /// 找出谱面里时间最晚的 Tap / Hold（不含 fake 音符）。
+    fn find_last_note(chart: &Chart) -> Option<(u32, u32)> {
+        let mut best: Option<(f64, u32, u32)> = None;
+        for (line_id, line) in chart.lines.iter().enumerate() {
+            for (note_id, note) in line.notes.iter().enumerate() {
+                if note.fake {
+                    continue;
+                }
+                // 只算 Tap（Click）/ Hold；Drag / Flick 不算
+                if !matches!(note.kind, NoteKind::Click | NoteKind::Hold { .. }) {
+                    continue;
+                }
+                let t = note.time;
+                if !t.is_finite() {
+                    continue;
+                }
+                if best.is_none_or(|(bt, _, _)| t > bt) {
+                    best = Some((t, line_id as u32, note_id as u32));
+                }
+            }
+        }
+        best.map(|(_, l, n)| (l, n))
     }
 
     pub fn reset(&mut self) {
@@ -524,6 +554,15 @@ impl Judge {
     }
 
     pub fn commit(&mut self, t: f64, what: Judgement, line_id: u32, note_id: u32, diff: f64, timing: Option<f64>) {
+        // 性歌：谱面最后一个 Tap / Hold 打不出 Perfect（降为 Good）
+        let what = if self.force_last_good
+            && what == Judgement::Perfect
+            && self.last_note == Some((line_id, note_id))
+        {
+            Judgement::Good
+        } else {
+            what
+        };
         self.judgements.borrow_mut().push((t, line_id, note_id, Ok(what)));
         self.inner.commit(what, diff);
         // 判定文字动画要看全部判定（含 Miss），所以单独记一份
@@ -1247,6 +1286,9 @@ impl Judge {
     fn auto_play_update(&mut self, res: &mut Resource, chart: &mut Chart) {
         let t = res.time;
         let spd = res.config.speed as f64;
+        // 奥拓普雷手感不好：全部提前 80ms 命中，且判 Good
+        let offbeat = res.config.autoplay_offbeat();
+        let lead = if offbeat { 0.08 } else { 0. };
         let mut judgements = Vec::new();
         for (line_id, (line, (idx, st))) in chart.lines.iter_mut().zip(self.notes.iter_mut()).enumerate() {
             for id in &idx[*st..] {
@@ -1263,7 +1305,7 @@ impl Judge {
                 if !matches!(note.judge, JudgeStatus::NotJudged) {
                     continue;
                 }
-                if note.time > t {
+                if note.time - lead > t {
                     break;
                 }
                 note.judge = if matches!(note.kind, NoteKind::Hold { .. }) {
@@ -1283,7 +1325,14 @@ impl Judge {
             }
         }
         for (line_id, id) in judgements.into_iter() {
-            self.commit(t, Judgement::Perfect, line_id as _, id, 0., None);
+            self.commit(
+                t,
+                if offbeat { Judgement::Good } else { Judgement::Perfect },
+                line_id as _,
+                id,
+                if offbeat { -lead } else { 0. },
+                None,
+            );
             let (note_transform, note_hitsound) = {
                 let line = &mut chart.lines[line_id];
                 let note = &mut line.notes[id as usize];

@@ -36,8 +36,12 @@ bitflags! {
         const FULL_SCREEN_JUDGE = 0x0400;
         /// 血条模式：Perfect / Good 回血，Bad / Miss 扣血，血量归零即失败。
         const HEALTH_MODE = 0x0800;
+        /// 奥拓普雷手感不好：自动播放，但所有音符**提前 80ms** 命中，判定一律 `Good`。
+        const AUTOPLAY_OFFBEAT = 0x1000;
+        /// 性歌：谱面**最后一个 Tap / Hold** 强制判为 `Good`（打不出 AP）。
+        const LAST_NOTE_GOOD = 0x2000;
 
-        const UNRATED = Self::AUTOPLAY.bits() | Self::NO_SHADER.bits() | Self::NO_COMBO_SCORE.bits() | Self::FULL_SCREEN_JUDGE.bits() | Self::HEALTH_MODE.bits();
+        const UNRATED = Self::AUTOPLAY.bits() | Self::NO_SHADER.bits() | Self::NO_COMBO_SCORE.bits() | Self::FULL_SCREEN_JUDGE.bits() | Self::HEALTH_MODE.bits() | Self::AUTOPLAY_OFFBEAT.bits() | Self::LAST_NOTE_GOOD.bits();
     }
 }
 
@@ -904,7 +908,20 @@ impl Config {
 
     #[inline]
     pub fn autoplay(&self) -> bool {
-        self.has_mod(Mods::AUTOPLAY)
+        // 「手感不好」也是一种自动播放（只是提前 80ms 且判 Good）
+        self.has_mod(Mods::AUTOPLAY) || self.has_mod(Mods::AUTOPLAY_OFFBEAT)
+    }
+
+    /// 自动播放 + 提前 80ms + 全 Good（奥拓普雷手感不好）。
+    #[inline]
+    pub fn autoplay_offbeat(&self) -> bool {
+        self.has_mod(Mods::AUTOPLAY_OFFBEAT)
+    }
+
+    /// 性歌：最后一个 Tap / Hold 判 Good。
+    #[inline]
+    pub fn last_note_good(&self) -> bool {
+        self.has_mod(Mods::LAST_NOTE_GOOD)
     }
 
     /// 全局「自动游玩」开关（设置 → 谱面 / 单谱面 mods 面板都写这里）。
@@ -1255,6 +1272,19 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn autoplay_offbeat_and_last_note_good() {
+        let mut c = Config::default();
+        assert!(!c.autoplay() && !c.autoplay_offbeat() && !c.last_note_good());
+        // 「手感不好」也算自动播放；两个新 mod 都必须进入 UNRATED（影响公平 → 不上传）
+        c.mods.insert(Mods::AUTOPLAY_OFFBEAT);
+        assert!(c.autoplay() && c.autoplay_offbeat());
+        assert!(c.mods.intersects(Mods::UNRATED), "奥拓普雷手感不好必须在 UNRATED 集合里");
+        c.mods = Mods::LAST_NOTE_GOOD;
+        assert!(c.last_note_good());
+        assert!(c.mods.intersects(Mods::UNRATED), "性歌必须在 UNRATED 集合里");
+    }
 
     #[test]
     fn changed_note_flow_speed_blocks_upload() {

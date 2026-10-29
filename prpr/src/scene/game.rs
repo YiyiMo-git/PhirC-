@@ -496,7 +496,8 @@ impl GameScene {
 
         let exercise_range = (chart.offset + info_offset + res.config.offset) as f64..res.track_length;
 
-        let judge = Judge::new(&chart);
+        let mut judge = Judge::new(&chart);
+        judge.force_last_good = res.config.last_note_good();
 
         let music = Self::new_music(&mut res)?;
         crate::core::reset_block_effects();
