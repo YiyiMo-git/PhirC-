@@ -37,7 +37,7 @@ use prpr::{
     config::Mods,
     core::{Tweenable, BOLD_FONT},
     ext::{
-        open_url, poll_future, rect_shadow, semi_black, semi_white, unzip_into, JoinToString, LocalTask, RectExt, SafeTexture, ScaleType,
+        open_url, poll_future, rect_shadow, semi_black, unzip_into, JoinToString, LocalTask, RectExt, SafeTexture, ScaleType,
         BLACK_TEXTURE,
     },
     fs::{self},
@@ -328,6 +328,10 @@ pub struct SongScene {
     downloading: Option<Downloading>,
     loading_last: f32,
 
+    /// 待播放的回放磁带：按 play 时转交 `global_launch`（见 `crate::scene::replay`）。
+    /// 只对「从回放库打开的信息页」有值，普通开局是 None。
+    replay_on_launch: Option<prpr::replay::Replay>,
+
     rank_icons: [SafeTexture; 8],
     record: Option<SimpleRecord>,
 
@@ -398,10 +402,15 @@ pub struct SongScene {
     should_stabilize_approve_ranked: Arc<AtomicBool>,
 
     scene_task: LocalTask<Result<NextScene>>,
-    /// Web 版谱面预选页（#page-song）点「开始游玩」后由 webui 置 true：
-    /// 本场景只负责把游玩流程跑起来，**不再展示自己那一屏预选交互**，
-    /// 于是点下去直接进 Loading → 游玩。预选界面改由 Web 承担。
-    pub auto_play: bool,
+
+    /// 从 WebView 曲库直接开局：跳过本信息页，构造后自动 `launch()` 并轮询加载任务。
+    /// 只有 `webui::take_next_scene` 会置 true（`with_auto_launch()`）。
+    auto_launch: bool,
+    /// 自动开局阶段：0 未开始 / 1 下载或加载中 / 2 已交给游戏。
+    ///
+    /// ⚠️ 游戏是用 `NextScene::Overlay` 压在 SongScene 上的，退出游戏会**回到这个场景**。
+    /// 没有阶段标记的话会再次 `launch()` → 表现为「点退出反而重开」。阶段 2 时直接 `Pop` 回曲库。
+    auto_phase: u8,
 
     uploader_btn: RectButton,
 
@@ -455,7 +464,7 @@ impl SongScene {
                     }
                 })),
                 loaded: Arc::default(),
-                load_time: f32::NAN,
+                load_time: <f32>::NAN,
             }
         } else {
             chart.illu
@@ -485,6 +494,7 @@ impl SongScene {
             icons,
 
             next_scene: None,
+        replay_on_launch: None,
 
             preview: None,
             preview_task: Some(Task::new({
@@ -539,7 +549,7 @@ impl SongScene {
             offset_plus_btn: DRectButton::new(),
 
             side_content: SideContent::Edit,
-            side_enter_time: f32::INFINITY,
+            side_enter_time: <f32>::INFINITY,
 
             save_task: None,
             upload_task: None,
@@ -596,14 +606,15 @@ impl SongScene {
             should_stabilize_approve_ranked: Arc::default(),
 
             scene_task: None,
-            auto_play: false,
+            auto_launch: false,
+            auto_phase: 0,
 
             uploader_btn: RectButton::new(),
 
             sf: SFader::new(),
             fade_start: 0.,
 
-            tr_start: f32::NAN,
+            tr_start: <f32>::NAN,
             background: Arc::default(),
 
             open_web_btn: DRectButton::new(),
@@ -849,8 +860,23 @@ impl SongScene {
         self.menu.set_options(self.menu_options.iter().map(|it| tl!(*it).into_owned()).collect());
     }
 
+    /// 设置「按 play 时播放这个回放」。
+    pub fn set_replay_on_launch(&mut self, replay: prpr::replay::Replay) {
+        self.replay_on_launch = Some(replay);
+    }
+
+    /// 从 WebView 曲库直接开局：跳过本信息页，构造后自动 `launch()`。
+    pub fn with_auto_launch(mut self) -> Self {
+        self.auto_launch = true;
+        self
+    }
+
     fn launch(&mut self, mode: GameMode, force_unlock: bool) -> Result<()> {
         let local_path = self.local_path.as_ref().unwrap();
+        // 回放：把磁带转交开局流程（同线程同步消费，紧跟着的 global_launch 会取走）
+        if let Some(replay) = self.replay_on_launch.take() {
+            crate::scene::replay::queue_for_launch(replay);
+        }
         let is_unlock = force_unlock
             || (mode == GameMode::Normal
                 && get_data()
@@ -895,14 +921,37 @@ impl SongScene {
         // 会把它覆盖掉（见下面 `config.mods.set`）。两边取值不一致的话，
         // 全局自动游玩打开后这里会误判成"计入排行"→ 不弹提示，但成绩其实不上传。
         // AUTOPLAY 属于 UNRATED 掩码，所以全局自动游玩 = 这一局不计入排行。
-        let mut eff_mods = mods;
+        // —— 全局 Mod（曲库 → MOD 页）与每谱 Mod 合并 ——
+        // 回放播放不合并（要还原当年的画面/速度），其余模式：
+        // `每谱 mods | 全局 mods`；**冲突组（上隐/下隐、AP/FC）以每谱显式设置的那侧为准**。
+        let global_mods = if mode == GameMode::Replay {
+            Mods::empty()
+        } else {
+            get_data().config.mods
+        };
+        let mut eff_mods = mods | global_mods;
+        for (own, other) in [
+            (Mods::FADE_IN, Mods::FADE_OUT),
+            (Mods::FADE_OUT, Mods::FADE_IN),
+            (Mods::INSTANT_DEATH_AP, Mods::INSTANT_DEATH_FC),
+            (Mods::INSTANT_DEATH_FC, Mods::INSTANT_DEATH_AP),
+        ] {
+            if mods.contains(own) {
+                eff_mods.remove(other);
+            }
+        }
         if pending_daily.is_none() {
             // 每日挑战有自己的一套约束，不吃全局开关 —— 和下面装配时保持一致
             eff_mods.set(Mods::AUTOPLAY, get_data().config.autoplay());
         }
+        // —— 回放播放：先取走磁带，`rated` / 模式 / update_fn 都要用它 ——
+        let replay_pending = crate::scene::replay::take_pending();
+        let replay_mode = replay_pending.is_some();
         let rated = {
             let config = &get_data().config;
             config.upload_record
+                // 回放播放绝不是正式局
+                && !replay_mode
                 && !config.offline_mode
                 && can_rated
                 && !eff_mods.intersects(Mods::UNRATED)
@@ -911,6 +960,8 @@ impl SongScene {
                 // 「音符映射」（设置 → 谱面）改过谱面数据 → 和引擎侧一样不上传。
                 // 两边的条件必须一致，否则这里会误判成"计入排行"→ 不弹提示，但成绩没上传。
                 && config.note_map.is_identity()
+                // 流速同理（设置 → 谱面 → 音符流速）：改过可读距离就按改版处理。
+                && config.note_flow_speed_is_default()
         };
         if !rated && can_rated && mode == GameMode::Normal {
             show_message(tl!("warn-unrated")).warn();
@@ -1017,6 +1068,30 @@ impl SongScene {
             update_fn
         });
 
+        // —— 回放播放：挂播放驱动（占掉 update_fn 槽，回放不联机所以没冲突）——
+        let update_fn = if let Some(r) = &replay_pending {
+            let speed = if r.speed > 0. { r.speed } else { 1. };
+            Some(crate::scene::replay::build_driver(r.clone(), speed, 0.))
+        } else {
+            update_fn
+        };
+        let mode = if replay_pending.is_some() { GameMode::Replay } else { mode };
+        // —— 回放录制 ——
+        // 正式局（Normal、无每日挑战覆盖、不是回放）自动录一份。其余模式不录：
+        // 练习 / 调偏移录了也没法复现，回放更不能再录（会套娃）。
+        if mode == GameMode::Normal {
+            // ⚠️ video feature 下 `local_path` 在函数开头被 shadow 成 `String`（要 move 进闭包），
+            // 非 video 时还是 `&str`；这里显式归一成 `&str`，两种配置都能编过。
+            let local_path_str: &str = &local_path;
+            crate::replay::start_recording(
+                crate::replay::chart_ref_of(id, Some(local_path_str)),
+                get_data().config.offset,
+                eff_mods.bits() as u32,
+                prpr::replay::Gameplay::capture(&get_data().config),
+                get_data().me.as_ref().map(|it| it.name.clone()),
+            );
+        }
+
         let save_fn: Option<SaveFn> = Some(Box::new({
             let local_path = local_path.to_string();
             move |new_rec| -> Result<()> {
@@ -1062,7 +1137,8 @@ impl SongScene {
                 }
             };
             let chart_updated = info.chart_updated;
-            config.mods = mods;
+            // 合并后的 mods（每谱 | 全局）才是这一局真正生效的那份
+            config.mods = eff_mods;
             // 全局「自动游玩」开关（设置 → 谱面）是最终决定权：
             // 单谱面 mods 里那份只做显示同步，不参与最后取值。
             if !daily_override {
@@ -1699,12 +1775,57 @@ impl SongScene {
     }
 }
 
+impl Drop for SongScene {
+    fn drop(&mut self) {
+        // 回放中途退出（暂停菜单直接退出）不会走 on_result，
+        // 这里兜底清掉回放态 + 注入的合成触摸，别把陈旧触摸漏给下一局。
+        if crate::scene::replay::is_playing() {
+            crate::scene::replay::finish_playing();
+        }
+    }
+}
+
 impl Scene for SongScene {
     fn on_result(&mut self, tm: &mut TimeManager, res: Box<dyn Any>) -> Result<()> {
         let res = match res.downcast::<SimpleRecord>() {
             Err(res) => res,
             Ok(rec) => {
                 self.fade_start = tm.now() as f32 + fade_in_time().unwrap_or_default();
+                // —— 回放录制收尾 ——（在 `rec` 被移走前把成绩快照抄走；落盘失败只警告）
+                if crate::replay::is_recording() {
+                    let result = prpr::replay::ReplayResult {
+                        score: rec.score.max(0) as u32,
+                        accuracy: rec.accuracy as f64,
+                        max_combo: rec.max_combo,
+                        num_of_notes: rec.num_of_notes,
+                        counts: rec.counts,
+                    };
+                    if let Some(replay) = crate::replay::finish_recording(
+                        Some(result),
+                        self.info.name.clone(),
+                        self.info.level.clone(),
+                        self.info.difficulty,
+                    ) {
+                        let key =
+                            crate::replay::chart_key(self.info.id, self.local_path.as_deref(), &self.info.name, &self.info.level);
+                        match crate::replay::library::recording_path(&key, replay.meta.recorded_at.unwrap_or_default()) {
+                            Ok(path) => {
+                                if let Err(err) = crate::replay::save_replay(&replay, &path) {
+                                    warn!(?err, "failed to save replay");
+                                } else {
+                                    info!("[replay] 已保存回放 {}", path.display());
+                                }
+                            }
+                            Err(err) => warn!(?err, "failed to resolve replay path"),
+                        }
+                    }
+                }
+                // —— 回放播放结束 —— 只是「看当年这一局」：不写历史 / 不计每日 / 不更新记录。
+                if crate::scene::replay::is_playing() {
+                    crate::scene::replay::finish_playing();
+                    show_message(tl!("replay-finished")).ok();
+                    return Ok(());
+                }
                 if self.my_rate_score == Some(0) && thread_rng().gen_ratio(2, 5) {
                     self.rate_dialog.enter(tm.real_time() as _);
                 }
@@ -2004,8 +2125,14 @@ impl Scene for SongScene {
             }
             if self.mod_btn.touch(touch) {
                 button_hit();
-                self.side_content = SideContent::Mods;
-                self.side_enter_time = tm.real_time() as _;
+                // 优先打开 WebView 的「谱面管理」面板（Mod / 全局设置 / 编辑谱面 / 谱面信息）；
+                // 没有 WebView2 时退回原生 Mod 侧栏。
+                if crate::webui::host_available() {
+                    crate::webui::open_chart_panel(path);
+                } else {
+                    self.side_content = SideContent::Mods;
+                    self.side_enter_time = tm.real_time() as _;
+                }
                 return Ok(true);
             }
         }
@@ -2032,16 +2159,99 @@ impl Scene for SongScene {
     }
 
     fn update(&mut self, tm: &mut TimeManager) -> Result<()> {
-        // Web 预选页直接开玩：一挂上就起游玩流程，跳过自己的预选界面。
-        // 在线谱面此时 local_path 还为空（要先下载），这里不会触发，
-        // 于是自然退回 SongScene 原有的「下载 → 游玩」流程。
-        if self.auto_play && self.scene_task.is_none() && self.next_scene.is_none() {
-            if let Some(path) = self.local_path.clone() {
-                if !path.starts_with(':') {
-                    self.auto_play = false;
-                    self.launch(GameMode::Normal, false)?;
+        // 管理面板（WebView）改了 Mods：把值同步回内存里的这份，否则按 play 用的还是旧值
+        if let Some((path, bits)) = crate::webui::take_pending_mods() {
+            if self.local_path.as_deref() == Some(path.as_str()) {
+                self.mods = prpr::config::Mods::from_bits_truncate(bits);
+            }
+        }
+        // —— 从 WebView 曲库直接开局：跳过信息页，自动 launch / 下载并轮询 ——
+        if self.auto_launch {
+            // 在线谱面：先把远程 info 拉到（下载需要 `entity`）
+            if let Some(task) = &mut self.load_task {
+                if let Some(res) = task.take() {
+                    match res {
+                        Ok(Some(chart)) => self.entity = Some(chart.as_ref().clone()),
+                        // 在线谱面却查不到 → 别停在黑屏，直接退出本页
+                        Ok(None) => {
+                            if self.local_path.is_none() {
+                                show_message(tl!("load-charts-failed")).error();
+                                self.auto_phase = 2;
+                            }
+                        }
+                        Err(err) => {
+                            show_error(err.context(tl!("load-charts-failed")));
+                            if self.local_path.is_none() {
+                                self.auto_phase = 2;
+                            }
+                        }
+                    }
+                    self.load_task = None;
                 }
             }
+            match self.auto_phase {
+                0 => {
+                    if self.local_path.is_some() {
+                        self.auto_phase = 1;
+                        if let Err(err) = self.launch(GameMode::Normal, false) {
+                            show_error(err);
+                            self.auto_phase = 2;
+                        }
+                    } else if self.entity.is_some() {
+                        self.auto_phase = 1;
+                        if let Err(err) = self.start_download() {
+                            show_error(err);
+                            self.auto_phase = 2;
+                        }
+                    }
+                    // `entity` 还没到 → 等 `load_task`
+                }
+                1 => {
+                    // 在线：下载完成 → 载入 → 立刻 launch
+                    if let Some(dl) = &mut self.downloading {
+                        if let Some(tuple) = dl.check()? {
+                            self.local_path = dl.local_path.take();
+                            self.downloading = None;
+                            if let Some(tuple) = tuple {
+                                self.load_tuple(tuple)?;
+                            }
+                            if self.local_path.is_some() {
+                                if let Err(err) = self.launch(GameMode::Normal, false) {
+                                    show_error(err);
+                                    self.auto_phase = 2;
+                                }
+                            }
+                        }
+                    }
+                    // 开局任务完成 → 交给游戏
+                    if let Some(task) = &mut self.scene_task {
+                        if let Some(res) = poll_future(task.as_mut()) {
+                            match res {
+                                Err(err) => {
+                                    show_error(err);
+                                    self.auto_phase = 2;
+                                }
+                                Ok(scene) => {
+                                    self.next_scene = Some(scene);
+                                    self.auto_phase = 2;
+                                }
+                            }
+                            self.scene_task = None;
+                        }
+                    }
+                    // 下载失败 / 被取消：别卡在黑屏，退出本页
+                    if self.downloading.is_none() && self.scene_task.is_none() && self.local_path.is_none() && self.next_scene.is_none() {
+                        self.auto_phase = 2;
+                    }
+                }
+                _ => {
+                    // 已经开过局：说明是从游戏退回来的 —— 直接退出本页回曲库（不再重开）
+                    if self.next_scene.is_none() {
+                        self.next_scene = Some(NextScene::Pop);
+                    }
+                }
+            }
+            return Ok(());
         }
         let t = tm.now() as f32;
         self.menu.update(t);
@@ -2094,7 +2304,7 @@ impl Scene for SongScene {
             }
         }
         if self.side_enter_time < 0. && -tm.real_time() as f32 + edit_transit().unwrap_or_default() < self.side_enter_time {
-            self.side_enter_time = f32::INFINITY;
+            self.side_enter_time = <f32>::INFINITY;
         }
         if CONFIRM_AUTOCOMPLETE.fetch_and(false, Ordering::SeqCst) {
             self.start_autocomplete();
@@ -2196,7 +2406,7 @@ impl Scene for SongScene {
                     Err(err) => {
                         error!(?err, "failed to play");
                         *self.background.lock().unwrap() = None;
-                        self.tr_start = f32::NAN;
+                        self.tr_start = <f32>::NAN;
                         let error = format!("{err:?}");
                         Dialog::plain(tl!("failed-to-play"), error)
                             .buttons(vec![tl!("play-cancel").into_owned(), tl!("play-switch-to-offline").into_owned()])
@@ -2832,6 +3042,25 @@ impl Scene for SongScene {
     }
 
     fn render(&mut self, tm: &mut TimeManager, ui: &mut Ui) -> Result<()> {
+        // 自动开局：不画信息页。本地谱面加载完进 LoadingScene 之前仍是黑屏，
+        // 但**在线谱面下载期间没有 LoadingScene**——必须把 Downloading 的动画画出来，
+        // 否则从 WebView 曲库点在线谱面会看到一段纯黑（2026-10-24 用户实测）。
+        if self.auto_launch {
+            let t = tm.now() as f32;
+            set_camera(&ui.camera());
+            if let Some(dl) = &mut self.downloading {
+                // 下载动画：转圈 + 进度 + 状态文案 + 取消按钮（Downloading::render）
+                dl.render(ui, t);
+            } else {
+                ui.fill_rect(ui.screen_rect(), Color::new(0., 0., 0., 1.));
+                // 远程信息拉取中 / 谱面加载中（scene_task）：LoadingScene 要等加载完才出现，
+                // 这期间也得有转圈，不能纯黑（2026-10-24 用户实测反馈）
+                if self.load_task.is_some() || self.scene_task.is_some() {
+                    ui.loading(0., 0., t, WHITE, (None, &mut self.loading_last));
+                }
+            }
+            return Ok(());
+        }
         set_camera(&ui.camera());
         let t = tm.now() as f32;
         ui.fill_rect(ui.screen_rect(), (*self.illu.texture.1, ui.screen_rect()));
@@ -2950,7 +3179,9 @@ impl Scene for SongScene {
             let pad = 0.08;
             let r = Rect::new(1. - pad - w, ui.top - pad - w, w, w);
             self.play_btn.render_shadow(ui, r, t, |ui, path| {
-                ui.fill_path(&path, semi_white(0.3));
+                // 播放键的圆底压在曲绘上（本场景是「全屏曲绘 + semi_black(0.55)」，恒深）
+                // → 写死半透明白。`semi_white` 是主题墨色，浅色主题下会变成深色圆底。
+                ui.fill_path(&path, Color::new(1., 1., 1., 0.3));
                 let r = r.feather(-0.04);
                 ui.fill_rect(
                     r,
@@ -2971,7 +3202,8 @@ impl Scene for SongScene {
                 ui.dy(-ui.top + 0.03);
                 let s = 0.08;
                 let r = Rect::new(-s, 0., s, s);
-                let cc = semi_white(0.4);
+                // 同上：压在曲绘上的图标，禁用态用半透明白而不是主题墨色
+                let cc = Color::new(1., 1., 1., 0.4);
                 ui.fill_rect(r, (*self.icons.menu, r, ScaleType::Fit, if self.menu_options.is_empty() { cc } else { WHITE }));
                 self.menu_btn.set(ui, r);
                 if self.need_show_menu {
@@ -3090,7 +3322,7 @@ impl Scene for SongScene {
         if !self.tr_start.is_nan() {
             let p = ((rt - self.tr_start - 0.2) / 0.4).clamp(0., 1.);
             if p >= 1. {
-                self.tr_start = f32::NAN;
+                self.tr_start = <f32>::NAN;
             }
             let p = 1. - (1. - p).powi(3);
             let mut r = ui.screen_rect();

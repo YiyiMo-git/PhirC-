@@ -401,36 +401,16 @@ impl Page for SettingsPage {
             let bottom = sb.y - m.u(4.);
 
             let cr = ui.content_rect();
-            // 分类条方向：竖屏横排（顶部分类条），横屏竖排（左侧分类栏）
-            self.tabs.set_horizontal(m.compact);
-            let (strip, r) = if m.compact {
-                // 竖屏：分类条**横排**在返回键下方铺满整宽，内容区在它下面铺满整宽。
-                // （原来是左侧一条 118px 宽的竖栏，在手机宽度上会吃掉 1/3 屏，行卡被压扁。）
-                let back = crate::newui::back_rect(ui, &m);
-                let x0 = cr.x;
-                let right = cr.right();
-                let sy = back.bottom() + m.u(10.);
-                let sh = m.u(42.);
-                let cy = sy + sh + m.u(10.);
-                (
-                    Rect::new(x0, sy, right - x0, sh),
-                    Rect::new(x0, cy, right - x0, (bottom - cy).max(m.u(60.))),
-                )
-            } else {
-                let mut lcr = cr;
-                lcr.h = (bottom - lcr.y).max(0.1);
-                // 分类栏宽度：按**真实标签宽度**算，别再硬编码 160px。
-                // 原来固定 `m.u(160.)` 比最长标签（「谱面UI」）宽出一大截，看着又粗又空。
-                // 这里取最宽标签 + 左右内边距，再夹到 [96, 180] 设计稿 px 之间。
-                let max_lbl = self.tabs.label_widths(ui).into_iter().fold(0f32, f32::max);
-                let strip_w = (max_lbl + m.u(44.)).clamp(m.u(96.), m.u(180.));
-                // 分类栏贴在内容区左缘（活动栏已删除，直接贴 content_rect 左缘），
-                // 内容面板整体右移让位。
-                let strip = Rect::new(lcr.x, lcr.y, strip_w, lcr.h);
-                lcr.x += strip_w + m.u(8.);
-                lcr.w -= strip_w + m.u(8.);
-                (strip, lcr)
-            };
+            // ---- Phigros 版式（参考 `kaichang/Setting.html`）----
+            // 标签栏**始终横排在顶部**（与返回键同一行、整体居中），内容区在它下面铺满整宽。
+            // 原来的「横屏 = 左侧竖栏」版式整条退役。
+            self.tabs.set_style(crate::tabs::TabStyle::Phigros);
+            self.tabs.set_horizontal(true);
+            let back = crate::newui::back_rect(ui, &m);
+            let sh = m.u(66.);
+            let strip = Rect::new(cr.x, back.center().y - sh * 0.5, cr.w, sh);
+            let cy = strip.bottom() + m.u(8.);
+            let r = Rect::new(cr.x, cy, cr.w, (bottom - cy).max(m.u(60.)));
 
             // HUD 自定义布局：设置列表大框
             const SLOT_LIST: crate::hud::SlotDef = crate::hud::SlotDef::centered("list", [0., 0., 1.65, 1.1], crate::hud::Cap(true, true, true));
@@ -442,7 +422,11 @@ impl Page for SettingsPage {
             };
             let _ = th;
 
-            self.tabs.render(ui, rt, "settings", strip, r, |ui, item| {
+            // 内容区走「扁平」分组：不铺卡片底、不画分隔线 —— Phigros 版式里
+            // 各行是直接落在页面底上的（间隔靠留白）。渲染完立刻复位，别影响别的页面。
+            crate::newui::set_flat_groups(true);
+            prpr::ui::set_skew_sliders(true);
+            let tabs_res = self.tabs.render(ui, rt, "settings", strip, r, |ui, item| {
                 let r = r.feather(-0.01);
                 self.scroll.size((r.w, r.h));
                 ui.scope(|ui| {
@@ -461,7 +445,21 @@ impl Page for SettingsPage {
                 });
 
                 Ok(())
-            })
+            });
+            crate::newui::set_flat_groups(false);
+            prpr::ui::set_skew_sliders(false);
+
+            // 右侧两条细斜线（参考图里的装饰件）
+            if tabs_res.is_ok() {
+                let th2 = crate::newui::theme();
+                let lw = m.u(150.);
+                for i in 0..2 {
+                    let rr = Rect::new(cr.right() - m.u(20.) - lw, cr.y + cr.h * (0.44 + 0.07 * i as f32), lw, m.u(2.));
+                    crate::newui::skew_rect(ui, rr, m.u(9.), th2.with_a(th2.border, 0.55));
+                }
+            }
+
+            tabs_res
         })?;
 
         // Phira 自带登录界面必须在**全屏**上画。
@@ -503,20 +501,7 @@ fn render_about(ui: &mut Ui, mut r: Rect, icon: &SafeTexture) -> (f32, f32) {
     let ow = r.w;
     let r = r.feather(-0.02);
     let th = crate::newui::theme();
-
-    let ct = r.center();
-
-    // Logo：圆角块
-    let s = 0.1;
-    let ir = Rect::new(ct.x - s, r.y + 0.05, s * 2., s * 2.);
-    let radius = 0.02;
-    ui.fill_path(&ir.rounded(radius), th.bg_elev);
-    ui.stroke_path(&ir.rounded(radius), 0.0016, th.with_a(th.accent, 0.7));
-    ui.fill_path(&ir.feather(-0.045).rounded(radius * 0.5), (**icon, ir.feather(-0.045)));
-
-    // 分隔线
-    let div_y = ir.bottom() + 0.03;
-    ui.fill_rect(Rect::new(ct.x - 0.14, div_y, 0.28, 0.0016), th.with_a(th.accent, 0.55));
+    let m = crate::newui::Metrics::new(ui);
 
     let staff = &*STAFF_LIST;
     let text = tl!(
@@ -546,41 +531,57 @@ fn render_about(ui: &mut Ui, mut r: Rect, icon: &SafeTexture) -> (f32, f32) {
     let body = lines.collect::<Vec<_>>().join("\n");
     let body = body.trim();
 
-    // 版本行：亮蓝粗体 + 柔光
-    // （注意：这里以前用 `draw_using(&BOLD_FONT)`，在浅色主题 + 这个面板里一个字都画不出来，
-    //  换成默认画笔就正常 —— 版本行因此一直缺失。）
-    let fr = ui
-        .text(first)
-        .pos(ct.x, div_y + 0.045)
-        .anchor(0.5, 0.)
-        .size(0.62)
-        .color(th.text_hi)
-        .draw();
+    // ---- 头部：Logo + 竖分隔线 + 版本信息（并排；参考 `kaichang/Setting.html` 的「关于」页）----
+    let head_cy = r.y + m.u(76.);
+    let logo_h = m.u(56.);
+    let lw = (logo_h * (icon.width() / icon.height().max(1.))).max(m.u(40.));
+    let gap = m.u(34.);
+    let ver = [format!("Version : {first}"), format!("Device : {}", std::env::consts::OS)];
+    let vw = ver
+        .iter()
+        .map(|s| ui.text(s.as_str()).size(m.f(15.)).no_baseline().measure().w)
+        .fold(0f32, f32::max);
+    let div_w = m.u(1.5);
+    let total = lw + gap + div_w + gap + vw;
+    let x0 = r.center().x - total * 0.5;
 
-    // 正文：面板卡片 + 提亮文字
-    let lh = 0.52 * 1.46;
-    let w_max = body
-        .lines()
-        .map(|l| ui.text(l).size(0.52).no_baseline().measure().w)
-        .fold(0., f32::max)
-        .min(r.w * 0.86);
-    let n = body.lines().count() as f32;
-    let card = Rect::new(ct.x - w_max * 0.5 - 0.045, fr.bottom() + 0.05, w_max + 0.09, n * lh + 0.05);
-    // 正文卡 = 玻璃薄片：**不要再叠一层白**（父面板已经是白玻璃，叠上去就是一块死白），
-    // 所以这里用一点点墨色 + 1px 浅边 + 柔和阴影，读起来才像「玻璃上的一张玻璃」。
-    crate::newui::glass_glow(ui, card, 0.016, &th, 0.);
-    crate::newui::rounded(ui, card, 0.016, th.wash(0.04));
-    crate::newui::rounded_stroke(ui, card, 0.016, 0.0013, th.border);
-    crate::newui::rounded(ui, Rect::new(card.x, card.center().y - card.h * 0.3, 0.0035, card.h * 0.6), 0.0018, th.accent);
-    ui.text(body)
-        .pos(card.x + 0.045, card.y + 0.025)
-        .size(0.52)
-        .multiline()
-        .max_width(w_max + 0.01)
-        .color(th.text)
-        .draw();
+    // Logo 是**白字 + 蓝辉光**、为深底设计 → 恒用白色 tint，不再跟主题墨色（否则浅色下变黑块）。
+    let logo_r = Rect::new(x0, head_cy - logo_h * 0.5, lw, logo_h);
+    ui.fill_rect(logo_r, (**icon, logo_r, ScaleType::Fit, WHITE));
 
-    (ow, card.bottom() + 0.03)
+    let div_x = logo_r.right() + gap;
+    ui.fill_rect(Rect::new(div_x, head_cy - m.u(26.), div_w, m.u(52.)), th.with_a(th.border, 0.85));
+
+    let tx = div_x + div_w + gap;
+    for (i, s) in ver.iter().enumerate() {
+        ui.text(s.as_str())
+            .pos(tx, head_cy - m.u(11.) + i as f32 * m.u(24.))
+            .anchor(0., 0.5)
+            .no_baseline()
+            .size(m.f(15.))
+            .color(th.text_dim)
+            .draw();
+    }
+
+    // ---- 正文：两列（工作人员名单很长，单列会拖出一大截空白）----
+    let body_lines: Vec<&str> = body.lines().collect();
+    let half = body_lines.len().div_ceil(2);
+    let top = head_cy + m.u(66.);
+    let col_w = (r.w - m.u(72.)) * 0.5;
+    for (i, l) in body_lines.iter().enumerate() {
+        let (c, row) = if i < half { (0, i) } else { (1, i - half) };
+        let cx = r.x + m.u(36.) + col_w * c as f32;
+        ui.text(*l)
+            .pos(cx, top + row as f32 * m.u(19.))
+            .anchor(0., 0.5)
+            .no_baseline()
+            .max_width(col_w - m.u(14.))
+            .size(m.f(13.))
+            .color(th.text)
+            .draw();
+    }
+
+    (ow, r.bottom())
 }
 
 fn render_title<'a>(ui: &mut Ui, title: impl Into<Cow<'a, str>>, subtitle: Option<Cow<'a, str>>) -> f32 {
@@ -651,23 +652,20 @@ fn render_title<'a>(ui: &mut Ui, title: impl Into<Cow<'a, str>>, subtitle: Optio
     }
 }
 
-/// 设置项的行卡：磨砂玻璃 + 1px 浅边 + 悬停提亮（与开始页/曲库卡同一套玻璃语言）。
-pub fn row_card(ui: &mut Ui, r: Rect) {
-    let th = crate::newui::theme();
-    let (mx, my) = crate::newui::mouse_world();
-    let hp = if ui.rect_to_global(r).contains(vec2(mx, my)) { 1. } else { 0. };
-    crate::newui::glass_card(ui, r, 0.014, &th, hp);
-}
+// 原来的 `row_card`（每行一张独立圆角卡）已经删掉：2026-10-09 起设置页的 7 个 section
+// 全部改成 iOS 分组列表 —— 整组一个圆角容器（`newui::group_plate`）+ 行只叠悬停与
+// 内缩发丝线（`newui::group_row`），所以不再需要「每行一张卡」这个函数。
 
 #[inline]
 fn render_switch(ui: &mut Ui, r: Rect, t: f32, btn: &mut DRectButton, on: bool) {
-    // 开关 = **显式「开 / 关」按钮**（原胶囊已弃用）：
-    // 胶囊是 2:1 的小件（实际仅约 60×30px）+ 滑块位置隐喻，用户反馈点不准、看不出状态。
-    // 按钮把状态写成字，命中区就是整块 `r`，不再有"点边缘落空"的问题。
+    // Phigros 版式：开关 = **斜切白方块**（`on` 时叠一个黑勾），命中区仍是整行。
+    // 原来的「开 / 关」文字按钮退役（参考图里没有文字，靠勾选状态表达）。
     let th = crate::newui::theme();
     let m = crate::newui::Metrics::new(ui);
     btn.build(ui, t, r, |ui, _path| {
-        crate::newui::toggle_btn(ui, &m, r, on, &th);
+        let s = m.u(30.);
+        let br = Rect::new(r.right() - s, r.center().y - s * 0.5, s, s);
+        crate::newui::skew_check(ui, br, s * 0.34, on, &th);
     });
 }
 
@@ -858,7 +856,7 @@ impl GeneralList {
         if self.fullscreen_btn.touch(touch, t) {
             config.fullscreen_mode ^= true;
 
-            macroquad::window::set_fullscreen(config.fullscreen_mode);
+            crate::webui::set_fullscreen(config.fullscreen_mode);
 
             return Ok(Some(true));
         }
@@ -1030,11 +1028,43 @@ impl GeneralList {
         // 行内文字宽度上限：右侧还要放开关 / 按钮 / 滑块
         set_row_text_max(w - 0.38);
         let mut h = 0.;
+        // ---- iOS 分组列表（inset grouped）----
+        // 整组**共用一个圆角容器**，行与行紧贴、靠内缩发丝线分隔（原来是「每行一张
+        // 独立圆角卡 + 4 单位间隙」，那是卡片语言的观感）。
+        // ⚠️ 容器必须在画第一行**之前**铺好 —— 即时模式下晚画会盖住已画好的行内容，
+        //    所以这里必须**先知道行数**。
+        // ⚠️ `n_items` 是**手工核对**出来的：21 个固定项 + 2 个 `#[cfg]` 门控项。
+        //    以后加/删 `item!` 一定要同步改这里，否则容器高度会和内容对不上。
+        //    门控项用 `cfg!` 宏在运行时计入，不用跟着编译目标写两套常量。
+        let th = crate::newui::theme();
+        let group_radius = 0.014;
+        let n_items = 21usize
+            + usize::from(cfg!(all(any(target_os = "windows", target_os = "linux"), not(target_env = "ohos"))))
+            + usize::from(cfg!(not(target_env = "ohos")));
+        // 容器高度 = 行数 × 行高，**再加上末尾那 0.04 的额外间距**
+        // （section 尾部有一句 `ui.dy(0.04); h += 0.04;` 把「重置」单独推开一段）。
+        // 行本身不带底色，所以容器里那段空隙是看不见的，但容器必须够高。
+        crate::newui::group_plate(ui, &th, Rect::new(0., 0., w, row_h() * n_items as f32 + 0.04), group_radius);
+        let mut gi = 0usize;
         macro_rules! item {
             ($($b:tt)*) => {{
-                // 每个设置项 = 一张**玻璃行卡**（kaichang 卡片语言：磨砂底 + 1px 浅边 +
-                // 悬停提亮/外发光）。行高里留 4px 当间距，相邻卡片才不会糊成一整块。
-                row_card(ui, Rect::new(0., 0., w, row_h() - 0.004));
+                // 每个设置项 = 分组里的一行：**不填底板**（底板是整组的圆角容器），
+                // 只叠悬停墨色 + 底部内缩发丝线（内缩到 `LEFT`，对齐标题左缘）。
+                let row = Rect::new(0., 0., w, row_h());
+                let (mx, my) = crate::newui::mouse_world();
+                let hp = if ui.rect_to_global(row).contains(vec2(mx, my)) { 1. } else { 0. };
+                crate::newui::group_row(
+                    ui,
+                    &th,
+                    row,
+                    hp,
+                    gi == 0,
+                    gi + 1 == n_items,
+                    group_radius,
+                    0.06,
+                    Color::new(0., 0., 0., 0.),
+                );
+                gi += 1;
                 $($b)*
                 ui.dy(row_h());
                 h += row_h();
@@ -1178,6 +1208,9 @@ impl GeneralList {
             self.reset_btn.render_text(ui, rr, t, tl!("reset"), 0.5, true);
         }
         self.lang_btn.render_top(ui, t, 1.);
+        // 用一下 `gi`：既避免「最后一次自增没人读」的告警，也顺手校验 `n_items`
+        // 和实际条数一致 —— debug 构建下不一致会直接 panic，比肉眼看布局靠谱得多。
+        debug_assert_eq!(gi, n_items, "settings 分组：n_items 与实际 item! 条数不一致");
         (w, h)
     }
 }
@@ -1282,11 +1315,34 @@ impl AudioList {
         // 行内文字宽度上限：右侧还要放开关 / 按钮 / 滑块
         set_row_text_max(w - 0.38);
         let mut h = 0.;
+        // ---- iOS 分组列表（inset grouped）---- 见 `GeneralList::render` 的说明。
+        // ⚠️ `n_items` 手工核对：5 个固定项 + 2 个 `#[cfg]` 门控项。
+        let th = crate::newui::theme();
+        let group_radius = 0.014;
+        let n_items = 5usize
+            + usize::from(cfg!(not(target_os = "android")))
+            + usize::from(cfg!(target_env = "ohos"));
+        crate::newui::group_plate(ui, &th, Rect::new(0., 0., w, row_h() * n_items as f32), group_radius);
+        let mut gi = 0usize;
         macro_rules! item {
             ($($b:tt)*) => {{
-                // 每个设置项 = 一张**玻璃行卡**（kaichang 卡片语言：磨砂底 + 1px 浅边 +
-                // 悬停提亮/外发光）。行高里留 4px 当间距，相邻卡片才不会糊成一整块。
-                row_card(ui, Rect::new(0., 0., w, row_h() - 0.004));
+                // 每个设置项 = 分组里的一行：**不填底板**（底板是整组的圆角容器），
+                // 只叠悬停墨色 + 底部内缩发丝线（内缩到 `LEFT`，对齐标题左缘）。
+                let row = Rect::new(0., 0., w, row_h());
+                let (mx, my) = crate::newui::mouse_world();
+                let hp = if ui.rect_to_global(row).contains(vec2(mx, my)) { 1. } else { 0. };
+                crate::newui::group_row(
+                    ui,
+                    &th,
+                    row,
+                    hp,
+                    gi == 0,
+                    gi + 1 == n_items,
+                    group_radius,
+                    0.06,
+                    Color::new(0., 0., 0., 0.),
+                );
+                gi += 1;
                 $($b)*
                 ui.dy(row_h());
                 h += row_h();
@@ -1332,6 +1388,7 @@ impl AudioList {
             let buf_size = config.audio_buffer_size.unwrap_or(256);
             self.audio_buffer_size_btn.render_text(ui, rr, t, format!("{}", buf_size), 0.5, false);
         }
+        debug_assert_eq!(gi, n_items, "settings 分组：n_items 与实际 item! 条数不一致");
         (w, h)
     }
 
@@ -1369,6 +1426,9 @@ struct ChartList {
     health_scale_slider: Slider,
     /// 噪区精细度（掩码分辨率除数）。
     block_mask_slider: Slider,
+    block_low_perf_btn: DRectButton,
+    /// 音符流速（`Config.note_flow_speed`）：全局**视觉**流速倍率。
+    note_flow_speed_slider: Slider,
     health_color_btn: DRectButton,
     health_len_slider: Slider,
     motion_btn: DRectButton,
@@ -1492,6 +1552,10 @@ impl ChartList {
                 prpr::core::MIN_MASK_DIVISOR as f32..prpr::core::MAX_MASK_DIVISOR as f32,
                 1.0,
             ),
+            // 音符流速：范围与 `Config::global_note_flow_speed` 的 clamp(0.1, 5.) 对齐。
+            // `Slider::new` 收**排他**范围，p=1 时算出的值正好是右端点。
+            note_flow_speed_slider: Slider::new(0.1..5., 0.05),
+            block_low_perf_btn: DRectButton::new(),
             health_color_btn: DRectButton::new(),
             health_len_slider: Slider::new(Config::HEALTH_BAR_LEN_MIN..Config::HEALTH_BAR_LEN_MAX, 0.05),
             motion_btn: DRectButton::new(),
@@ -1628,6 +1692,18 @@ impl ChartList {
             prpr::core::set_mask_divisor(config.block_mask_divisor);
             return Ok(wt);
         }
+        // 音符流速：改完**下一局**生效（`Game` 构造时读 config，局内由
+        // `sync_note_flow_speed` 同步到 `Resource`）。
+        if let wt @ Some(_) = self.note_flow_speed_slider.touch(touch, t, &mut config.note_flow_speed) {
+            config.note_flow_speed = config.note_flow_speed.clamp(0.1, 5.);
+            return Ok(wt);
+        }
+        // 噪区低性能模式：改完立刻生效（绘制路径每帧读原子量）。
+        if self.block_low_perf_btn.touch(touch, t) {
+            config.block_area_low_performance ^= true;
+            prpr::core::set_low_performance(config.block_area_low_performance);
+            return Ok(Some(true));
+        }
         if let wt @ Some(_) = self.health_scale_slider.touch(touch, t, &mut config.health_scale) {
             config.health_scale = config.health_scale.clamp(0.1, 5.);
             return Ok(wt);
@@ -1720,11 +1796,32 @@ impl ChartList {
         // 行内文字宽度上限：右侧还要放开关 / 按钮 / 滑块
         set_row_text_max(w - 0.38);
         let mut h = 0.;
+        // ---- iOS 分组列表（inset grouped）---- 见 `GeneralList::render` 的说明。
+        // ⚠️ `n_items` 手工核对：本 section 全部是固定项，没有 `#[cfg]` 门控。
+        let th = crate::newui::theme();
+        let group_radius = 0.014;
+        let n_items = 42usize;
+        crate::newui::group_plate(ui, &th, Rect::new(0., 0., w, row_h() * n_items as f32), group_radius);
+        let mut gi = 0usize;
         macro_rules! item {
             ($($b:tt)*) => {{
-                // 每个设置项 = 一张**玻璃行卡**（kaichang 卡片语言：磨砂底 + 1px 浅边 +
-                // 悬停提亮/外发光）。行高里留 4px 当间距，相邻卡片才不会糊成一整块。
-                row_card(ui, Rect::new(0., 0., w, row_h() - 0.004));
+                // 每个设置项 = 分组里的一行：**不填底板**（底板是整组的圆角容器），
+                // 只叠悬停墨色 + 底部内缩发丝线（内缩到 `LEFT`，对齐标题左缘）。
+                let row = Rect::new(0., 0., w, row_h());
+                let (mx, my) = crate::newui::mouse_world();
+                let hp = if ui.rect_to_global(row).contains(vec2(mx, my)) { 1. } else { 0. };
+                crate::newui::group_row(
+                    ui,
+                    &th,
+                    row,
+                    hp,
+                    gi == 0,
+                    gi + 1 == n_items,
+                    group_radius,
+                    0.06,
+                    Color::new(0., 0., 0., 0.),
+                );
+                gi += 1;
                 $($b)*
                 ui.dy(row_h());
                 h += row_h();
@@ -1870,6 +1967,15 @@ impl ChartList {
             );
         }
         item! {
+            render_title(ui, tl!("item-block-low-perf"), Some(tl!("item-block-low-perf-sub")));
+            render_switch(ui, rr, t, &mut self.block_low_perf_btn, config.block_area_low_performance);
+        }
+        item! {
+            render_title(ui, tl!("item-note-flow-speed"), Some(tl!("item-note-flow-speed-sub")));
+            self.note_flow_speed_slider
+                .render(ui, rr, t, config.note_flow_speed, format!("{:.2}x", config.note_flow_speed));
+        }
+        item! {
             render_title(ui, tl!("item-health-scale"), Some(tl!("item-health-scale-sub")));
             self.health_scale_slider
                 .render(ui, rr, t, config.health_scale, format!("{:.1}x", config.health_scale));
@@ -1929,6 +2035,7 @@ impl ChartList {
             render_title(ui, tl!("item-history"), Some(tl!("item-history-sub")));
             self.history_btn.render_text(ui, rr, t, tl!("item-history-open"), 0.45, false);
         }
+        debug_assert_eq!(gi, n_items, "settings 分组：n_items 与实际 item! 条数不一致");
         (w, h)
     }
 }
@@ -2190,11 +2297,35 @@ impl ChartUiList {
         // 行内文字宽度上限：右侧还要放开关 / 按钮 / 滑块
         set_row_text_max(w - 0.38);
         let mut h = 0.;
+        // ---- iOS 分组列表（inset grouped）---- 见 `GeneralList::render` 的说明。
+        // ⚠️ `n_items` 手工核对：本 section 全部是固定项，没有 `#[cfg]` 门控。
+        // 本 section 里有 4 条 `// ---- 打击表现 / 实时 HUD / 准度条 / 判定范围可视化 ----`
+        // 的子分组注释，但**当前代码并没有给它们任何视觉分隔**，所以这里仍然只铺**一个**
+        // 容器 —— 保持与既有观感一致。以后想按子分组分开，就再拆成多个 `group_plate`。
+        let th = crate::newui::theme();
+        let group_radius = 0.014;
+        let n_items = 39usize;
+        crate::newui::group_plate(ui, &th, Rect::new(0., 0., w, row_h() * n_items as f32), group_radius);
+        let mut gi = 0usize;
         macro_rules! item {
             ($($b:tt)*) => {{
-                // 每个设置项 = 一张**玻璃行卡**（kaichang 卡片语言：磨砂底 + 1px 浅边 +
-                // 悬停提亮/外发光）。行高里留 4px 当间距，相邻卡片才不会糊成一整块。
-                row_card(ui, Rect::new(0., 0., w, row_h() - 0.004));
+                // 每个设置项 = 分组里的一行：**不填底板**（底板是整组的圆角容器），
+                // 只叠悬停墨色 + 底部内缩发丝线（内缩到 `LEFT`，对齐标题左缘）。
+                let row = Rect::new(0., 0., w, row_h());
+                let (mx, my) = crate::newui::mouse_world();
+                let hp = if ui.rect_to_global(row).contains(vec2(mx, my)) { 1. } else { 0. };
+                crate::newui::group_row(
+                    ui,
+                    &th,
+                    row,
+                    hp,
+                    gi == 0,
+                    gi + 1 == n_items,
+                    group_radius,
+                    0.06,
+                    Color::new(0., 0., 0., 0.),
+                );
+                gi += 1;
                 $($b)*
                 ui.dy(row_h());
                 h += row_h();
@@ -2412,6 +2543,7 @@ impl ChartUiList {
                 render_switch(ui, rr, t, &mut self.judge_range_note_btn, on_note);
             }
         }
+        debug_assert_eq!(gi, n_items, "settings 分组：n_items 与实际 item! 条数不一致");
         (w, h)
     }
 }
@@ -2420,9 +2552,8 @@ impl ChartUiList {
 //
 // 多账号管理：列出 `Data::accounts` 里保存过的账号，可**一键切换**、**添加**、**删除**。
 //
-// 为什么做这一页：Phira 只有「邮箱 + 密码」登录，而开始页是那份逐字节冻结的
-// `ui/index.html`，里面**没有任何账号入口** —— 移动端因此根本没法登录 / 换号。
-// 账号管理放在设置里，就不依赖那个 HTML 了。
+// 为什么做这一页：Phira 只有「邮箱 + 密码」登录，原生界面里**没有任何账号入口**
+// —— 移动端因此根本没法登录 / 换号。账号管理放在设置里，就不用另开入口了。
 //
 // 切换账号 = 用保存的凭据重新登录（Phira 没有长期 token，这是唯一可靠做法），
 // 所以切换是**异步**的：点了以后起一个 Task，跑完显示提示。
@@ -2608,9 +2739,32 @@ impl AccountList {
         // 卡片高度与推进量对不上 —— 表现就是「所有卡片叠在一起」。
         set_row_text_max(w - 0.38);
         let mut h = 0.;
+        // ---- iOS 分组列表（inset grouped）---- 见 `GeneralList::render` 的说明。
+        // ⚠️ `n_items` 手工核对：本 section 全部是固定项，没有 `#[cfg]` 门控。
+        // （`th` 这个 section 上面已经有了，不重复声明。）
+        let group_radius = 0.014;
+        let n_items = 4usize;
+        crate::newui::group_plate(ui, &th, Rect::new(0., 0., w, row_h() * n_items as f32), group_radius);
+        let mut gi = 0usize;
         macro_rules! item {
             ($($b:tt)*) => {{
-                row_card(ui, Rect::new(0., 0., w, row_h() - 0.004));
+                // 每个设置项 = 分组里的一行：**不填底板**（底板是整组的圆角容器），
+                // 只叠悬停墨色 + 底部内缩发丝线（内缩到 `LEFT`，对齐标题左缘）。
+                let row = Rect::new(0., 0., w, row_h());
+                let (mx, my) = crate::newui::mouse_world();
+                let hp = if ui.rect_to_global(row).contains(vec2(mx, my)) { 1. } else { 0. };
+                crate::newui::group_row(
+                    ui,
+                    &th,
+                    row,
+                    hp,
+                    gi == 0,
+                    gi + 1 == n_items,
+                    group_radius,
+                    0.06,
+                    Color::new(0., 0., 0., 0.),
+                );
+                gi += 1;
                 $($b)*
                 ui.dy(row_h());
                 h += row_h();
@@ -2729,6 +2883,7 @@ impl AccountList {
         }
         // 登录界面**不在这里画** —— 它按全屏设计，必须由 `SettingsPage::render`
         // 在滚动区之外调用 `render_login_overlay`，否则会被裁剪/变形。
+        debug_assert_eq!(gi, n_items, "settings 分组：n_items 与实际 item! 条数不一致");
         (w, h)
     }
 
@@ -2759,9 +2914,9 @@ impl GetOrInsertBtn for Vec<DRectButton> {
 //
 // 手机上没有 adb，出问题只能靠截图。这里把 `<data>/phira-crash.log` 直接显示出来。
 //
-// 这个文件和 Java 侧 `CrashLog`、Rust 的 panic hook、以及 `webui::diag` 共用
+// 这个文件和 Java 侧 `CrashLog`、Rust 的 panic hook、以及 `crate::diag` 共用
 // （都在 `dir::root()` 下），所以里面既有 Java 的启动阶段/异常，也有 Rust 的
-// 启动阶段与 `[webui]` 诊断。
+// 启动阶段与 `[diag]` 诊断。
 
 struct LogList {
     /// 「刷新」按钮（重新读文件）
@@ -2855,17 +3010,30 @@ impl LogList {
         let w = r.w;
         set_row_text_max(w - 0.05);
         let mut h = 0.;
+        // ---- iOS 分组列表（inset grouped）---- 见 `GeneralList::render` 的说明。
+        // 本 section 有**两个**组：① 顶部「日志 + 刷新 / 清空」那一行；② 下面的日志行。
+        // 两组的边界在这里是**显式**的，所以各自铺一个容器就行，不用靠 `n_items` 猜。
+        let group_radius = 0.014;
+        let rr = right_rect(w);
+        let m = Metrics::new(ui);
+        let th = crate::newui::theme();
+
+        // 组 ①：只有一行
+        crate::newui::group_plate(ui, &th, Rect::new(0., 0., w, row_h()), group_radius);
+        let mut gi = 0usize;
+        let n_items = 1usize;
         macro_rules! item {
             ($($b:tt)*) => {{
-                row_card(ui, Rect::new(0., 0., w, row_h() - 0.004));
+                let row = Rect::new(0., 0., w, row_h());
+                let (mx, my) = crate::newui::mouse_world();
+                let hp = if ui.rect_to_global(row).contains(vec2(mx, my)) { 1. } else { 0. };
+                crate::newui::group_row(ui, &th, row, hp, gi == 0, gi + 1 == n_items, group_radius, 0.06, Color::new(0., 0., 0., 0.));
+                gi += 1;
                 $($b)*
                 ui.dy(row_h());
                 h += row_h();
             }}
         }
-        let rr = right_rect(w);
-        let m = Metrics::new(ui);
-        let th = crate::newui::theme();
 
         item! {
             render_title(ui, tl!("log-title"), Some(tl!("log-sub")));
@@ -2879,10 +3047,16 @@ impl LogList {
 
         // 每行日志占一个窄行（比设置项矮，才能在一屏里看更多）
         let line_h = row_h() * 0.62;
-        for line in &self.lines {
-            row_card(ui, Rect::new(0., 0., w, line_h - 0.004));
-            // `[webui]` / 失败 / 异常行高亮，方便一眼找到
-            let color = if line.contains("[webui") || line.contains("失败") || line.contains("Exception") {
+        // 组 ②：所有日志行共用一个容器
+        let lines_n = self.lines.len();
+        crate::newui::group_plate(ui, &th, Rect::new(0., 0., w, line_h * lines_n as f32), group_radius);
+        for (li, line) in self.lines.iter().enumerate() {
+            let row = Rect::new(0., 0., w, line_h);
+            let (mx, my) = crate::newui::mouse_world();
+            let hp = if ui.rect_to_global(row).contains(vec2(mx, my)) { 1. } else { 0. };
+            crate::newui::group_row(ui, &th, row, hp, li == 0, li + 1 == lines_n, group_radius, 0.06, Color::new(0., 0., 0., 0.));
+            // `[diag]` / 失败 / 异常行高亮，方便一眼找到
+            let color = if line.contains("[diag") || line.contains("失败") || line.contains("Exception") {
                 Color::new(1., 0.55, 0.45, 0.95)
             } else {
                 th.text_mute
@@ -2901,6 +3075,7 @@ impl LogList {
             ui.dy(line_h);
             h += line_h;
         }
+        debug_assert_eq!(gi, n_items, "settings 分组：n_items 与实际 item! 条数不一致");
         (w, h)
     }
 }
@@ -2963,11 +3138,32 @@ impl DebugList {
         // 行内文字宽度上限：右侧还要放开关 / 按钮 / 滑块
         set_row_text_max(w - 0.38);
         let mut h = 0.;
+        // ---- iOS 分组列表（inset grouped）---- 见 `GeneralList::render` 的说明。
+        // ⚠️ `n_items` 手工核对：本 section 全部是固定项，没有 `#[cfg]` 门控。
+        let th = crate::newui::theme();
+        let group_radius = 0.014;
+        let n_items = 5usize;
+        crate::newui::group_plate(ui, &th, Rect::new(0., 0., w, row_h() * n_items as f32), group_radius);
+        let mut gi = 0usize;
         macro_rules! item {
             ($($b:tt)*) => {{
-                // 每个设置项 = 一张**玻璃行卡**（kaichang 卡片语言：磨砂底 + 1px 浅边 +
-                // 悬停提亮/外发光）。行高里留 4px 当间距，相邻卡片才不会糊成一整块。
-                row_card(ui, Rect::new(0., 0., w, row_h() - 0.004));
+                // 每个设置项 = 分组里的一行：**不填底板**（底板是整组的圆角容器），
+                // 只叠悬停墨色 + 底部内缩发丝线（内缩到 `LEFT`，对齐标题左缘）。
+                let row = Rect::new(0., 0., w, row_h());
+                let (mx, my) = crate::newui::mouse_world();
+                let hp = if ui.rect_to_global(row).contains(vec2(mx, my)) { 1. } else { 0. };
+                crate::newui::group_row(
+                    ui,
+                    &th,
+                    row,
+                    hp,
+                    gi == 0,
+                    gi + 1 == n_items,
+                    group_radius,
+                    0.06,
+                    Color::new(0., 0., 0., 0.),
+                );
+                gi += 1;
                 $($b)*
                 ui.dy(row_h());
                 h += row_h();
@@ -3011,6 +3207,7 @@ impl DebugList {
             self.touch_alpha_slider
                 .render(ui, rr, t, config.touch_marker_alpha, format!("{:.0}%", config.touch_marker_alpha * 100.));
         }
+        debug_assert_eq!(gi, n_items, "settings 分组：n_items 与实际 item! 条数不一致");
         (w, h)
     }
 }
@@ -3032,6 +3229,9 @@ fn apply_upload_profile_to(config: &mut Config) -> usize {
     config.mods = Mods::empty();
     // 同步清掉旧的 autoplay 兼容字段，否则下次启动 init() 会把它又按回 true
     config.set_autoplay(false);
+    // 音符映射 + 流速也复位（它们各自也会挡上传）
+    config.note_map = Default::default();
+    config.note_flow_speed = 1.;
     // 每张谱面还各自记了一份 mod（LocalChart.mods），不清的话单独某张谱面照样传不了
     for chart in &mut get_data_mut().charts {
         chart.mods = Mods::default();
