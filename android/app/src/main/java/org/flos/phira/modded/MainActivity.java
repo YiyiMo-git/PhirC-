@@ -591,6 +591,20 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        // 原生返回键：WebView 可见且能历史后退时（第九章地图 → 曲库等），让 WebView
+        // 自己后退并消费事件；否则走游戏原有路径（暂停菜单等）。
+        // ⚠️ 用 dispatchKeyEvent 而不是 onBackPressed：SurfaceView 持焦点时按键
+        // 可能不走到 onBackPressed，这里在 Activity 层最早拦截。
+        if (event.getAction() == android.view.KeyEvent.ACTION_DOWN
+                && event.getKeyCode() == android.view.KeyEvent.KEYCODE_BACK
+                && webHost != null && webHost.goBack()) {
+            return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override
     protected void onResume() {
         super.onResume();
         InputBox.setActivity(this);
